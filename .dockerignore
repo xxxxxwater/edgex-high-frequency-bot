@@ -1,0 +1,29 @@
+# 忽略git相关文件
+.git
+.gitignore
+
+# 忽略构建目录
+target/
+Cargo.lock
+
+# 忽略IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 忽略日志文件
+*.log
+logs/
+
+# 忽略环境文件（敏感信息）
+.env
+.env.local
+
+# 忽略测试文件
+tests/
+test/
+
+# 忽略文档
+docs/
+*.md
