@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  edgex-high-frequency-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edgex-high-frequency-bot
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "edgex-high-frequency-bot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
