@@ -4,17 +4,17 @@
 
 ## 功能特性
 
-- 🚀 **高频交易**: 基于价格偏离的快速交易策略
-- 📊 **波动率控制**: 实时监控并控制投资组合波动率
-- ⚡ **性能优化**: 使用Rust语言，高性能低延迟
-- 🔒 **风险管理**: 内置止损止盈和交易频率控制
-- 📈 **实时监控**: 每小时性能报告和交易统计
-- 🐳 **容器化**: 支持Docker部署
-- 🔧 **配置灵活**: 支持多币种和参数自定义
+-  **高频交易**: 基于价格偏离的快速交易策略
+-  **波动率控制**: 实时监控并控制投资组合波动率
+-  **性能优化**: 使用Rust语言，高性能低延迟
+-  **风险管理**: 内置止损止盈和交易频率控制
+-  **实时监控**: 每小时性能报告和交易统计
+-  **容器化**: 支持Docker部署
+-  **配置灵活**: 支持多币种和参数自定义
 
 ## 技术架构
 
-- **语言**: Rust 2021 Edition
+- **语言**: Rust 2025 Edition
 - **异步运行时**: Tokio
 - **HTTP客户端**: Reqwest
 - **WebSocket**: Tokio-tungstenite
@@ -32,7 +32,7 @@
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/your-username/edgex-high-frequency-bot.git
+git clone https://github.com/xxxxxwater/edgex-high-frequency-bot.git
 cd edgex-high-frequency-bot
 ```
 
@@ -287,9 +287,10 @@ RUST_LOG=debug
 
 ## 联系方式
 
-- 项目地址: [GitHub Repository](https://github.com/your-username/edgex-high-frequency-bot)
-- 问题反馈: [Issues](https://github.com/your-username/edgex-high-frequency-bot/issues)
+- 项目地址: [GitHub Repository](https://github.com/xxxxxwater/edgex-high-frequency-bot)
+- 问题反馈: [Issues](https://github.com/xxxxxwater/edgex-high-frequency-bot/issues)
 
 ---
 
 **注意**: 交易有风险，投资需谨慎！
+
