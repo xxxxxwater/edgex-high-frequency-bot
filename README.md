@@ -198,10 +198,10 @@ docker run -d \
 
 ```bash
 # 构建镜像
-docker build -t your-username/edgex-high-frequency-bot .
+docker build -t pgresearchchris/edgex_hfreqt_bot:/latest
 
 # 推送到Docker Hub
-docker push your-username/edgex-high-frequency-bot:latest
+docker push pgresearchchris/edgex_hfreqt_bot:/latest
 ```
 
 ## 开发指南
@@ -293,6 +293,7 @@ RUST_LOG=debug
 ---
 
 **注意**: 交易有风险，投资需谨慎！
+
 
 
 
