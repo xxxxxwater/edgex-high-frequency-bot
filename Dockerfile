@@ -1,5 +1,5 @@
-# 使用官方Rust镜像作为构建环境
-FROM rust:1.75 as builder
+# 使用特定版本的Rust镜像作为构建环境（避免latest版本不兼容）
+FROM rust:1.82 AS builder
 
 # 设置工作目录
 WORKDIR /app
@@ -19,16 +19,16 @@ COPY src/ ./src/
 # 重新构建应用（使用缓存的依赖）
 RUN cargo build --release
 
-# 使用轻量级运行时镜像
-FROM debian:bullseye-slim
+# 使用Alpine Linux作为运行时镜像（更轻量、更稳定）
+FROM alpine:latest
 
 # 安装必要的运行时依赖
-RUN apt-get update && apt-get install -y \
+RUN apk add --no-cache \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    libgcc
 
 # 创建非root用户
-RUN useradd -m -u 1000 appuser
+RUN adduser -D -u 1000 appuser
 
 # 设置工作目录
 WORKDIR /app
@@ -47,9 +47,6 @@ USER appuser
 
 # 设置环境变量
 ENV RUST_LOG=info
-
-# 暴露必要的端口（如果需要）
-# EXPOSE 8080
 
 # 设置入口点
 ENTRYPOINT ["./edgex-high-frequency-bot"]

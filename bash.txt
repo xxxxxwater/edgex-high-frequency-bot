@@ -1,0 +1,20 @@
+
+
+1..env 文件
+
+EDGEX_API_KEY=your_api_key_here
+EDGEX_SECRET_KEY=your_secret_key_here
+
+
+
+2.运行命令
+
+# 安装依赖
+cargo build
+
+# 运行策略
+cargo run
+
+# 发布版本
+cargo build --release
+

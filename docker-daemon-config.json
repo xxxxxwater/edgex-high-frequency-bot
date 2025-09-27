@@ -1,0 +1,16 @@
+{
+  "builder": {
+    "gc": {
+      "defaultKeepStorage": "20GB",
+      "enabled": true
+    }
+  },
+  "dns": ["8.8.8.8", "114.114.114.114"],
+  "ipv6": false,
+  "experimental": false,
+  "registry-mirrors": [
+    "https://docker.mirrors.ustc.edu.cn",
+    "https://hub-mirror.c.163.com",
+    "https://registry.docker-cn.com"
+  ]
+}
