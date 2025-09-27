@@ -14,9 +14,6 @@ pub struct HighFrequencyStrategy {
     trading_interval: u64,
     positions: std::collections::HashMap<String, Position>,
     trade_records: Vec<TradeRecord>,
-    websocket_client: Option<EdgeXWebSocketClient>,
-    kline_manager: KlineManager,
-    use_websocket: bool,
 }
 
 impl HighFrequencyStrategy {
@@ -421,6 +418,5 @@ impl HighFrequencyStrategy {
         log::info!("降低交易频率: 间隔{}秒", self.trading_interval);
     }
 }
-
 
 
