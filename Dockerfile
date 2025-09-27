@@ -1,5 +1,5 @@
 # 使用官方Rust镜像作为构建环境
-FROM rust:1.70-slim-bullseye as builder
+FROM rust:1.75 as builder
 
 # 设置工作目录
 WORKDIR /app
