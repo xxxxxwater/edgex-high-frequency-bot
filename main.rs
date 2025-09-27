@@ -2,10 +2,12 @@ mod types;
 mod edgex_client;
 mod strategy;
 mod monitor;
+mod websocket_client;
 
 use crate::edgex_client::EdgeXClient;
 use crate::strategy::HighFrequencyStrategy;
 use crate::monitor::PerformanceMonitor;
+use crate::websocket_client::RealTimePriceStream;
 use crate::types::Config;
 use anyhow::Result;
 use std::sync::Arc;
@@ -40,8 +42,22 @@ async fn main() -> Result<()> {
     );
 
     // 创建策略实例
-    let strategy = HighFrequencyStrategy::new(client, config);
+    let strategy = HighFrequencyStrategy::new(client, config.clone());
     let strategy = Arc::new(Mutex::new(strategy));
+
+    // 启动WebSocket实时价格流
+    let mut price_stream = RealTimePriceStream::new(
+        config.api_key.clone(),
+        config.secret_key.clone(),
+        false, // 生产环境
+        config.symbols.clone(),
+    );
+    
+    let price_stream_task = tokio::spawn(async move {
+        if let Err(e) = price_stream.start_stream().await {
+            log::error!("WebSocket流错误: {}", e);
+        }
+    });
 
     // 启动性能监控
     let monitor = PerformanceMonitor::new(Arc::clone(&strategy));
@@ -49,7 +65,7 @@ async fn main() -> Result<()> {
 
     // 运行策略
     let strategy_clone = Arc::clone(&strategy);
-    tokio::spawn(async move {
+    let strategy_task = tokio::spawn(async move {
         let mut strategy = strategy_clone.lock().await;
         if let Err(e) = strategy.run().await {
             log::error!("策略运行错误: {}", e);
