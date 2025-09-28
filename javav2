@@ -32,7 +32,7 @@ import static com.tradez.order.common.strategy.enums.DirectionEnum.LONG;
 public class EdgeXLeverageStrategy {
     // EdgeX配置
     private static final String EDGEX_WEBSOCKET_URL = "wss://api.edgex.com/ws";
-    private static final String PRIVATE_KEY = "0143bbfcbb0136ae09ee55b167cb5651e1254a33a5368023bf31f6847fe354c3";
+    private static final String PRIVATE_KEY = "";
     private static final String PUBLIC_KEY = "025de26d61b2a8404f0bf1e332e2fd15186df0675f7f4692eff804edee76985e";
     private static final String PUBLIC_KEY_Y_COORDINATE = "07048663fce7ee0ff24cba72a17da91fde5d29693181010594506c6c9c00dee1";
     private static final String SYMBOL = "BTC-USDT";
