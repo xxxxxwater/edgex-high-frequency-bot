@@ -52,39 +52,60 @@ class RealTimePriceStream:
     
     async def start(self):
         """启动WebSocket连接（带重试机制）"""
-        max_retries = 5
-        retry_delay = 5  # 5秒重试间隔
+        max_retries = 3
+        retry_delay = 3  # 3秒重试间隔
         
         for attempt in range(max_retries):
             try:
                 # 连接公共WebSocket
+                logger.info(f"尝试连接WebSocket (第 {attempt + 1}/{max_retries} 次)...")
                 self.ws_manager.connect_public()
                 self.running = True
                 
-                logger.info("WebSocket连接已建立")
+                logger.info("✅ WebSocket连接已建立")
+                
+                # 等待连接稳定
+                await asyncio.sleep(1)
                 
                 # 订阅所有交易对的ticker数据
+                subscribed_count = 0
                 for symbol in self.symbols:
                     contract_id = self.contract_ids.get(symbol)
                     if contract_id:
-                        # 订阅ticker数据
-                        self.ws_manager.subscribe_ticker(
-                            contract_id=contract_id,
-                            handler=lambda msg, sym=symbol: self._handle_ticker_message(sym, msg)
-                        )
-                        logger.info(f"已订阅 {symbol} ({contract_id}) 的ticker数据")
+                        try:
+                            # 订阅ticker数据
+                            self.ws_manager.subscribe_ticker(
+                                contract_id=contract_id,
+                                handler=lambda msg, sym=symbol: self._handle_ticker_message(sym, msg)
+                            )
+                            logger.info(f"✅ 已订阅 {symbol} ({contract_id}) 的ticker数据")
+                            subscribed_count += 1
+                        except Exception as sub_error:
+                            logger.warning(f"订阅 {symbol} 失败: {sub_error}")
+                
+                if subscribed_count == 0:
+                    raise ValueError("没有成功订阅任何交易对")
+                
+                logger.info(f"✅ 成功订阅 {subscribed_count}/{len(self.symbols)} 个交易对")
                 
                 # 连接成功，跳出重试循环
                 break
                 
             except Exception as e:
-                logger.warning(f"WebSocket连接失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"⚠️ WebSocket连接失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                
+                # 清理连接
+                try:
+                    if self.ws_manager:
+                        self.ws_manager.disconnect_public()
+                except:
+                    pass
                 
                 if attempt < max_retries - 1:
                     logger.info(f"等待 {retry_delay} 秒后重试...")
                     await asyncio.sleep(retry_delay)
                 else:
-                    logger.error(f"WebSocket连接失败，已达到最大重试次数 ({max_retries})")
+                    logger.error(f"❌ WebSocket连接失败，已达到最大重试次数 ({max_retries})")
                     raise
     
     async def stop(self):

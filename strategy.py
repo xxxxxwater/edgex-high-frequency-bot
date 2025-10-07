@@ -150,15 +150,20 @@ class HighFrequencyStrategy:
         logger.info("策略开始运行...")
         
         try:
-            # 初始化WebSocket连接
-            await self._initialize_websocket()
-            
             # 更新账户信息
             await self._update_account_info()
             
-            # 启动WebSocket价格流
-            if self.price_stream:
-                await self.price_stream.start()
+            # 尝试初始化WebSocket连接（非阻塞，失败不影响主流程）
+            try:
+                await self._initialize_websocket()
+                
+                # 启动WebSocket价格流
+                if self.price_stream:
+                    await self.price_stream.start()
+                    logger.info("WebSocket价格流已启动")
+            except Exception as e:
+                logger.warning(f"WebSocket初始化失败，将使用REST API获取数据: {e}")
+                self.price_stream = None
             
             while self.is_running:
                 try:
@@ -167,7 +172,7 @@ class HighFrequencyStrategy:
                         await self._execute_strategy_for_symbol(symbol)
                     
                     # 等待下次交易
-                    await asyncio.sleep(1)  # 1秒间隔，WebSocket提供实时数据
+                    await asyncio.sleep(1)  # 1秒间隔
                     
                 except Exception as e:
                     logger.error(f"策略执行错误: {e}")
@@ -178,7 +183,10 @@ class HighFrequencyStrategy:
         finally:
             self.is_running = False
             if self.price_stream:
-                await self.price_stream.stop()
+                try:
+                    await self.price_stream.stop()
+                except:
+                    pass
             logger.info("策略已停止")
     
     async def _initialize_websocket(self):
@@ -262,12 +270,64 @@ class HighFrequencyStrategy:
     async def _execute_strategy_for_symbol(self, symbol: str):
         """为指定交易对执行策略"""
         try:
-            # 从WebSocket获取价格历史数据
+            # 首先尝试从WebSocket获取价格历史数据
             klines = self.price_history.get(symbol, [])
             
+            # 如果WebSocket数据不足，尝试从REST API获取Ticker数据构建简单K线
             if len(klines) < self.strategy_config.medium_ma_period:
-                logger.debug(f"{symbol}: 价格数据不足 (收到{len(klines)}/需要{self.strategy_config.medium_ma_period})")
-                return
+                logger.debug(f"{symbol}: WebSocket数据不足 (收到{len(klines)}/{self.strategy_config.medium_ma_period})，尝试使用Ticker数据")
+                
+                # 获取合约ID
+                contract_id = self.contract_ids.get(symbol)
+                if not contract_id:
+                    contract_id = await self.client.get_contract_id_by_symbol(symbol)
+                    if not contract_id:
+                        logger.error(f"{symbol}: 无法找到合约ID")
+                        return
+                    self.contract_ids[symbol] = contract_id
+                
+                # 尝试从REST API获取Ticker数据（EdgeX的K线API可能返回空数据）
+                try:
+                    ticker = await self.client.get_ticker(contract_id)
+                    if ticker:
+                        # 使用ticker数据创建一个简单的价格点
+                        current_price = float(ticker.get("lastPrice", 0))
+                        if current_price > 0:
+                            logger.debug(f"{symbol}: 使用ticker数据，当前价格: {current_price}")
+                            
+                            # 创建简单的价格数据用于信号生成
+                            from edgex_types import PriceData
+                            import time
+                            price_data = PriceData(
+                                timestamp=int(time.time() * 1000),
+                                open=current_price,
+                                high=current_price,
+                                low=current_price,
+                                close=current_price,
+                                volume=0
+                            )
+                            
+                            # 添加到历史记录
+                            if symbol not in self.price_history:
+                                self.price_history[symbol] = []
+                            self.price_history[symbol].append(price_data)
+                            
+                            # 保持历史记录在合理范围
+                            if len(self.price_history[symbol]) > 100:
+                                self.price_history[symbol] = self.price_history[symbol][-100:]
+                            
+                            # 使用ticker数据生成信号（基于单点价格）
+                            klines = [price_data]
+                        else:
+                            logger.warning(f"{symbol}: Ticker价格无效")
+                            return
+                    else:
+                        logger.warning(f"{symbol}: 无法获取Ticker数据")
+                        return
+                        
+                except Exception as e:
+                    logger.error(f"{symbol}: 获取Ticker失败 - {e}")
+                    return
             
             # 获取最新价格
             latest_price = klines[-1].close
@@ -296,20 +356,32 @@ class HighFrequencyStrategy:
         Returns:
             TradeSignal: 交易信号
         """
-        if len(klines) < self.strategy_config.medium_ma_period:
-            logger.warning(f"[信号生成] K线数据不足{self.strategy_config.medium_ma_period}根")
+        # 获取当前价格
+        current_price = self._get_current_price(klines)
+        
+        # 如果历史数据不足，使用价格历史计算均线
+        all_klines = self.price_history.get(symbol, [])
+        
+        # 使用所有可用的历史数据
+        if len(all_klines) >= self.strategy_config.medium_ma_period:
+            # 有足够的历史数据，使用标准MA策略
+            medium_ma = self._calculate_moving_average(all_klines, self.strategy_config.medium_ma_period)
+        elif len(all_klines) >= 2:
+            # 数据不足，使用所有可用数据计算MA
+            medium_ma = self._calculate_moving_average(all_klines, len(all_klines))
+            logger.debug(f"[信号生成] {symbol} 使用 {len(all_klines)} 根K线计算MA（需要{self.strategy_config.medium_ma_period}）")
+        else:
+            # 数据太少，暂时持有
+            logger.debug(f"[信号生成] {symbol} 历史数据不足（{len(all_klines)}<2），持有")
             return TradeSignal(
                 symbol=symbol,
                 direction=TradeDirection.HOLD,
                 confidence=0.0,
-                price=0.0,
+                price=float(current_price),
                 stop_loss=0.0,
                 take_profit=0.0
             )
         
-        # 计算均线
-        medium_ma = self._calculate_moving_average(klines, self.strategy_config.medium_ma_period)
-        current_price = self._get_current_price(klines)
         price_deviation = self._calculate_price_deviation(current_price, medium_ma)
         
         # 判断方向

@@ -142,7 +142,7 @@ class EdgeXClient:
         获取K线数据
         
         Args:
-            symbol: 合约ID（如"10000003"表示SOL-USDT）
+            symbol: 交易对名称（如"SOL-USDT"）或合约ID（如"10000003"）
             interval: 时间间隔（如"1m", "5m", "1h"）
             limit: 数量限制
             
@@ -150,6 +150,13 @@ class EdgeXClient:
             List[PriceData]: K线数据列表
         """
         try:
+            # 如果是交易对名称，需要转换为合约ID
+            contract_id = symbol
+            if not symbol.isdigit():
+                contract_id = await self.get_contract_id_by_symbol(symbol)
+                if not contract_id:
+                    raise ValueError(f"无法找到交易对 {symbol} 的合约ID")
+            
             # 映射interval格式
             interval_map = {
                 "1m": "1m",
@@ -165,7 +172,7 @@ class EdgeXClient:
             
             # 创建K线参数
             params = GetKLineParams(
-                contract_id=symbol,
+                contract_id=contract_id,
                 interval=sdk_interval,
                 size=str(limit)
             )
@@ -415,35 +422,51 @@ class EdgeXClient:
         if not EdgeXClient._cache_initialized:
             await self._init_contract_cache()
         
-        # 从缓存查找
+        # 从缓存查找（精确匹配）
         if symbol_name in EdgeXClient._contract_id_cache:
             return EdgeXClient._contract_id_cache[symbol_name]
         
         # 尝试映射常见的交易对格式
-        symbol_mapping = {
-            "BTC-USDT": "BTCUSD",
-            "ETH-USDT": "ETHUSD", 
-            "SOL-USDT": "SOLUSD",
-            "BNB-USDT": "BNB2USD",
-            "LTC-USDT": "LTC2USD",
-            "LINK-USDT": "LINK2USD",
-            "AVAX-USDT": "AVAX2USD",
-            "MATIC-USDT": "MATICUSD",
-            "XRP-USDT": "XRP2USD",
-            "DOGE-USDT": "DOGE2USD"
-        }
+        # EdgeX的命名格式可能是: BTCUSD, ETHUSD, SOLUSD 等
+        symbol_mappings = [
+            # 格式1: BTC-USDT -> BTCUSD
+            symbol_name.replace("-", "").replace("USDT", "USD"),
+            # 格式2: BTC-USDT -> BTCUSDT
+            symbol_name.replace("-", ""),
+            # 格式3: BTC-USDT -> BTC2USD (某些币种)
+            symbol_name.replace("-USDT", "2USD"),
+            # 格式4: 去掉连字符
+            symbol_name.replace("-", ""),
+            # 格式5: 小写
+            symbol_name.lower(),
+            symbol_name.lower().replace("-", ""),
+        ]
         
-        # 尝试映射后的名称
-        mapped_symbol = symbol_mapping.get(symbol_name)
-        if mapped_symbol and mapped_symbol in EdgeXClient._contract_id_cache:
-            return EdgeXClient._contract_id_cache[mapped_symbol]
+        # 尝试所有可能的映射格式
+        for mapped_symbol in symbol_mappings:
+            if mapped_symbol in EdgeXClient._contract_id_cache:
+                logger.info(f"找到映射: {symbol_name} -> {mapped_symbol} -> {EdgeXClient._contract_id_cache[mapped_symbol]}")
+                return EdgeXClient._contract_id_cache[mapped_symbol]
+        
+        # 模糊匹配：查找包含币种名称的合约
+        base_currency = symbol_name.split("-")[0]  # 提取 BTC, ETH 等
+        for cached_symbol, contract_id in EdgeXClient._contract_id_cache.items():
+            if not cached_symbol.isdigit():
+                # 检查是否包含币种名称
+                if base_currency.upper() in cached_symbol.upper():
+                    # 检查是否是USD交易对（排除其他交易对）
+                    if "USD" in cached_symbol.upper():
+                        logger.info(f"模糊匹配: {symbol_name} -> {cached_symbol} -> {contract_id}")
+                        # 保存映射以便下次使用
+                        EdgeXClient._contract_id_cache[symbol_name] = contract_id
+                        return contract_id
         
         # 调试：显示可用的交易对
-        logger.debug(f"查找交易对 {symbol_name}，可用交易对:")
+        logger.warning(f"未找到交易对 {symbol_name}，可用交易对:")
         count = 0
         for symbol in EdgeXClient._contract_id_cache.keys():
-            if not symbol.isdigit() and count < 10:
-                logger.debug(f"  {symbol}")
+            if not symbol.isdigit() and count < 20:
+                logger.warning(f"  {symbol}")
                 count += 1
         
         logger.warning(f"未找到交易对 {symbol_name} 的合约ID")
