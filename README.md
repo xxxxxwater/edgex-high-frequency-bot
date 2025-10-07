@@ -389,7 +389,8 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 - GitHub: https://github.com/xxxxxwater/edgex-high-frequency-bot
 - Issues: https://github.com/xxxxxwater/edgex-high-frequency-bot/issues
-- Email: https://pgresearch.org、chris@pgresearch.org
+- Email: chris@pgresearch.org
+- Website：https://pgresearch.org
 
 
 ## 📚 参考资料
