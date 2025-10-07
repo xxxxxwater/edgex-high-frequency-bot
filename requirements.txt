@@ -1,6 +1,7 @@
 # EdgeX SDK依赖（本地SDK目录）
 aiohttp>=3.8.0
 cryptography>=41.0.0
+pycryptodome>=3.18.0
 
 # 异步和网络
 websockets>=11.0.0

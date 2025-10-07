@@ -27,12 +27,21 @@ RUN pip install --upgrade pip && \
 # 复制项目文件
 COPY . .
 
-# 创建日志目录
+# 创建日志目录和数据目录
 RUN mkdir -p logs data
+
+# 添加执行权限
+RUN chmod +x docker-entrypoint.sh config_manager.py
+
+# 设置数据卷
+VOLUME ["/app/logs", "/app/data"]
 
 # 暴露端口（如果需要）
 # EXPOSE 8000
 
-# 设置启动命令
+# 使用入口脚本
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+# 默认命令
 CMD ["python", "main.py"]
 
