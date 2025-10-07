@@ -2,10 +2,12 @@ version: '3.8'
 
 services:
   edgex-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: edgex-high-frequency-bot:latest
+    # 从 Docker Hub 拉取镜像（或本地构建）
+    image: pgresearchchris/edgex-high-frequency-bot:latest
+    # 如果想本地构建，取消下面的注释
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     container_name: edgex-trading-bot
     restart: unless-stopped
     

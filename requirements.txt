@@ -1,11 +1,10 @@
 # EdgeX SDK依赖（本地SDK目录）
 aiohttp>=3.8.0
 cryptography>=41.0.0
-starkware-crypto>=0.1.0
 
 # 异步和网络
 websockets>=11.0.0
-asyncio>=3.4.3
+# asyncio是Python 3.11+的内置模块，无需安装
 
 # 数据处理
 pydantic>=2.0.0
