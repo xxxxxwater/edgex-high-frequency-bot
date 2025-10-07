@@ -5,6 +5,7 @@ pycryptodome>=3.18.0
 
 # 异步和网络
 websockets>=11.0.0
+websocket-client>=1.6.0
 # asyncio是Python 3.11+的内置模块，无需安装
 
 # 数据处理
