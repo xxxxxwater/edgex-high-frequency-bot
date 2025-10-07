@@ -226,7 +226,7 @@ docker push pgresearchchris/edgex-high-frequency-bot:latest
 
 ```bash
 # 拉取镜像
-docker pull pgresearchchris/edgex-high-frequency-bot:latest
+docker push pgresearchchris/edgex-high-frequency-bot:tagname
 
 # 运行
 docker run -d \
