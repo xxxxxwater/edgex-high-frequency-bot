@@ -1,52 +1,38 @@
-# 使用特定版本的Rust镜像作为构建环境（避免latest版本不兼容）
-FROM rust:1.82 AS builder
+# 使用Python 3.11官方镜像作为基础镜像
+FROM python:3.11-slim
 
 # 设置工作目录
 WORKDIR /app
-
-# 复制Cargo.toml和Cargo.lock（如果存在）
-COPY Cargo.toml ./
-
-# 创建虚拟main.rs来缓存依赖
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-
-# 构建依赖（缓存层）
-RUN cargo build --release
-
-# 复制源代码
-COPY src/ ./src/
-
-# 重新构建应用（使用缓存的依赖）
-RUN cargo build --release
-
-# 使用Alpine Linux作为运行时镜像（更轻量、更稳定）
-FROM alpine:latest
-
-# 安装必要的运行时依赖
-RUN apk add --no-cache \
-    ca-certificates \
-    libgcc
-
-# 创建非root用户
-RUN adduser -D -u 1000 appuser
-
-# 设置工作目录
-WORKDIR /app
-
-# 从构建阶段复制二进制文件
-COPY --from=builder /app/target/release/edgex-high-frequency-bot /app/
-
-# 复制配置文件（如果有）
-COPY --chown=appuser:appuser .env.example /app/
-
-# 设置文件权限
-RUN chown -R appuser:appuser /app
-
-# 切换到非root用户
-USER appuser
 
 # 设置环境变量
-ENV RUST_LOG=info
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 设置入口点
-ENTRYPOINT ["./edgex-high-frequency-bot"]
+# 安装系统依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制依赖文件
+COPY requirements.txt .
+
+# 安装Python依赖
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
+
+# 复制项目文件
+COPY . .
+
+# 创建日志目录
+RUN mkdir -p logs data
+
+# 暴露端口（如果需要）
+# EXPOSE 8000
+
+# 设置启动命令
+CMD ["python", "main.py"]
+

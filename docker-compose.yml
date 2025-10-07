@@ -1,24 +1,51 @@
 version: '3.8'
 
 services:
-  edgex-high-frequency-bot:
+  edgex-bot:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: edgex-high-frequency-bot
+    image: edgex-high-frequency-bot:latest
+    container_name: edgex-trading-bot
+    restart: unless-stopped
+    
+    # 环境变量配置
     env_file:
       - .env
-    restart: unless-stopped
+    
+    # 挂载卷（持久化日志和数据）
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data
+    
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # 日志配置
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "edgex-high-frequency-bot"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    
+    # 网络模式
+    network_mode: bridge
+
+# 如果需要多个实例或其他服务，可以在这里添加
+# 例如：Redis、PostgreSQL等
+

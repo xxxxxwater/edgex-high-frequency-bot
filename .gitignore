@@ -1,33 +1,70 @@
-# 编译输出
-/target/
-**/*.rs.bk
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# 依赖文件
-Cargo.lock
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv
 
-# 环境变量文件
+# 环境变量
 .env
 .env.local
-.env.production
 
-# 日志文件
-*.log
+# 日志
 logs/
+*.log
 
-# 系统文件
-.DS_Store
-Thumbs.db
-
-# IDE文件
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# 备份文件
-*.bak
-*.backup
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 数据文件
+data/
+*.db
+*.sqlite
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
 
 # 临时文件
 tmp/
 temp/
+*.tmp
+
