@@ -1,0 +1,114 @@
+"""
+EdgeX交易策略配置文件示例
+
+请复制此文件为 config.py 并填入您的真实信息
+⚠️ 警告：config.py 包含敏感信息，已在.gitignore中排除，请勿分享
+
+@version 3.6+
+@date 2025-10-08
+"""
+
+from dataclasses import dataclass
+from typing import List
+
+
+@dataclass
+class Config:
+    """配置类"""
+    # EdgeX账户信息
+    account_id: int
+    stark_private_key: str
+    
+    # 网络设置
+    testnet: bool = False
+    
+    # 交易对列表
+    symbols: List[str] = None
+    
+    @property
+    def base_url(self) -> str:
+        """API基础URL"""
+        return "https://test-api.edgex.exchange" if self.testnet else "https://pro.edgex.exchange"
+    
+    @property
+    def ws_url(self) -> str:
+        """WebSocket URL"""
+        return "wss://test-quote.edgex.exchange" if self.testnet else "wss://quote.edgex.exchange"
+
+
+def get_my_config() -> Config:
+    """获取配置"""
+    
+    config = Config(
+        # ===== 必填项 =====
+        # 你的EdgeX账户ID（从EdgeX官网获取）
+        account_id=YOUR_ACCOUNT_ID_HERE,  # 例如: 667221775494415325
+        
+        # 你的Stark私钥（用于L2交易签名）
+        stark_private_key="YOUR_STARK_PRIVATE_KEY_HERE",  # 例如: "0x1234..."
+        
+        # ===== 网络设置 =====
+        # 使用测试网还是生产网
+        # True = 测试网（虚拟资金，建议先测试）
+        # False = 生产网（真实资金）
+        testnet=True,  # 建议先用测试网验证策略
+        
+        # ===== 交易对设置 =====
+        # EdgeX使用USD而非USDT后缀
+        
+        # v3.6配置（4个币对，推荐新手）
+        symbols=[
+            "BTC-USD",
+            "ETH-USD",
+            "SOL-USD",
+            "BNB-USD"
+        ]
+        
+        # v3.7配置（7个币对，需要更多资金）
+        # symbols=[
+        #     "BTC-USD",
+        #     "ETH-USD",
+        #     "SOL-USD",
+        #     "BNB-USD",
+        #     "DOGE-USD",
+        #     "XRP-USD",
+        #     "HYPE-USD"
+        # ]
+    )
+    
+    return config
+
+
+# ===== 配置说明 =====
+# 
+# 1. 如何获取账户信息：
+#    - 访问 https://edgex.exchange
+#    - 注册并完成KYC
+#    - 进入账户设置 → API管理
+#    - 创建API密钥，保存以下信息：
+#      * Account ID（账户ID）
+#      * Stark Private Key（Stark私钥）
+#
+# 2. 测试网 vs 生产网：
+#    - 测试网：使用虚拟资金，无真实风险，建议先测试48小时
+#    - 生产网：使用真实资金，有真实盈亏
+#
+# 3. 交易对选择：
+#    - v3.6推荐：4个币对，适合20,000 USDT资金
+#    - v3.7推荐：7个币对，适合30,000+ USDT资金
+#    - 可以自定义币对列表，但需确保EdgeX支持该交易对
+#
+# 4. 密钥安全：
+#    - publicKey 和 publicKeyYCoordinate 会从 privateKey 自动派生
+#    - 请勿将 config.py 提交到GitHub或分享给任何人
+#    - 请妥善保管私钥，丢失无法找回
+#
+# 5. 快速开始：
+#    Step 1: 复制此文件为 config.py
+#    Step 2: 填入你的 account_id 和 stark_private_key
+#    Step 3: 选择测试网(testnet=True)或生产网(testnet=False)
+#    Step 4: 选择交易对（v3.6用4个，v3.7用7个）
+#    Step 5: 运行策略 python run_strategy_v3.6.py ema
+#
+
+

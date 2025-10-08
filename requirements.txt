@@ -1,0 +1,26 @@
+# EdgeX高频做市策略依赖
+
+# EdgeX SDK（本地安装）
+# 运行: cd edgex-python-sdk && pip install -e .
+
+# 日志
+loguru>=0.7.0
+
+# 环境变量
+python-dotenv>=1.0.0
+
+# 数据处理
+pandas>=2.0.0
+
+# WebSocket（EdgeX SDK已包含）
+# websocket-client>=1.6.0
+
+# 加密（EdgeX SDK已包含）
+# pycryptodome>=3.18.0
+
+# HTTP请求（EdgeX SDK已包含）
+# aiohttp>=3.8.0
+
+# 数值计算
+# decimal模块是Python内置的
+
