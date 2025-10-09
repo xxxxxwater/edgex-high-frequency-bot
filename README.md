@@ -277,6 +277,7 @@ self.max_open_orders = 60  # 60个标准，50个保守，80个激进
 - **Issues**: [提交问题](https://github.com/xxxxxwater/edgex-high-frequency-bot/issues)
 - **Email**: chris@pgresearch.org
 - **Website**: [PG Research](https://pgresearch.org)
+- **打赏地址EVM**：0x32880485c3ae9f7CF09888dfadd7D4191Cb3738C
 
 ## 🤝 贡献
 
