@@ -19,7 +19,7 @@ The orchestrator is `StrategyManager`, which schedules both strategies in a sing
 - **Variational hedging strategy**: `VariationalHedgingStrategyV38Service`
   - Runs on **BTC/ETH** by default.
   - Monitors net exposure across the hedge symbols and places offsetting orders when exposure exceeds a threshold.
-  - In normal state (exposure within limits), it uses **multi‑level grid spacing** for paired buy/sell orders (not top‑of‑book only).
+  - In normal state (exposure within limits), it places paired buy/sell orders at **best bid/ask** to promote fills.
 
 These symbol sets are **separated** by default, so Redis state does not collide as long as symbols do not overlap.
 
