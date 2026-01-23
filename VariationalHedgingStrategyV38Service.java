@@ -2,6 +2,8 @@ package com.tradez.order.common.strategy.py38;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -246,53 +248,73 @@ public class VariationalHedgingStrategyV38Service {
                 return;
             }
 
-            if (!gridMgr.canPlaceOrder()) {
-                return;
+            List<GridStrategyConfig.GridLevel> newBuyGrids = new ArrayList<>();
+            List<GridStrategyConfig.GridLevel> newSellGrids = new ArrayList<>();
+            gridMgr.setBuyGrids(Collections.emptyList());
+            gridMgr.setSellGrids(Collections.emptyList());
+
+            BigDecimal bestBidPrice = bestBid.getPrice();
+            BigDecimal bestAskPrice = bestAsk.getPrice();
+
+            for (int i = 0; i < GridStrategyConfig.gridLevels; i++) {
+                if (!gridMgr.canPlaceOrder()) {
+                    break;
+                }
+                if (!gridMgr.canOpenPosition(GridStrategyConfig.OrderSide.BUY)) {
+                    break;
+                }
+
+                BigDecimal offset = GridStrategyConfig.gridSpacingPct.multiply(BigDecimal.valueOf(i + 1));
+                BigDecimal gridPrice = bestBidPrice.multiply(BigDecimal.ONE.subtract(offset));
+
+                GridStrategyConfig.GridLevel buyLevel = new GridStrategyConfig.GridLevel(
+                        gridPrice,
+                        size,
+                        GridStrategyConfig.OrderSide.BUY
+                );
+                String buyOrderId = edgeXClient.placeOrder(new GridStrategyConfig.Order(
+                        thirdAccountId,
+                        contractId,
+                        GridStrategyConfig.OrderSide.BUY,
+                        GridStrategyConfig.OrderType.LIMIT,
+                        size,
+                        gridPrice,
+                        GridStrategyConfig.leverage
+                ));
+                if (buyOrderId != null) {
+                    buyLevel.setOrderId(buyOrderId);
+                    gridMgr.addPendingOrder(buyOrderId, buyLevel);
+                    newBuyGrids.add(buyLevel);
+                    gridMgr.updateOrderTime();
+                }
+
+                BigDecimal offsetSell = GridStrategyConfig.gridSpacingPct.multiply(BigDecimal.valueOf(i + 1));
+                BigDecimal gridPriceSell = bestAskPrice.multiply(BigDecimal.ONE.add(offsetSell));
+
+                GridStrategyConfig.GridLevel sellLevel = new GridStrategyConfig.GridLevel(
+                        gridPriceSell,
+                        size,
+                        GridStrategyConfig.OrderSide.SELL
+                );
+                String sellOrderId = edgeXClient.placeOrder(new GridStrategyConfig.Order(
+                        thirdAccountId,
+                        contractId,
+                        GridStrategyConfig.OrderSide.SELL,
+                        GridStrategyConfig.OrderType.LIMIT,
+                        size,
+                        gridPriceSell,
+                        GridStrategyConfig.leverage
+                ));
+                if (sellOrderId != null) {
+                    sellLevel.setOrderId(sellOrderId);
+                    gridMgr.addPendingOrder(sellOrderId, sellLevel);
+                    newSellGrids.add(sellLevel);
+                    gridMgr.updateOrderTime();
+                }
             }
 
-            GridStrategyConfig.GridLevel buyLevel = new GridStrategyConfig.GridLevel(
-                    bestBid.getPrice(),
-                    size,
-                    GridStrategyConfig.OrderSide.BUY
-            );
-            String buyOrderId = edgeXClient.placeOrder(new GridStrategyConfig.Order(
-                    thirdAccountId,
-                    contractId,
-                    GridStrategyConfig.OrderSide.BUY,
-                    GridStrategyConfig.OrderType.LIMIT,
-                    size,
-                    bestBid.getPrice(),
-                    GridStrategyConfig.leverage
-            ));
-            if (buyOrderId != null) {
-                buyLevel.setOrderId(buyOrderId);
-                gridMgr.addPendingOrder(buyOrderId, buyLevel);
-                gridMgr.updateOrderTime();
-            }
-
-            if (!gridMgr.canPlaceOrder()) {
-                return;
-            }
-
-            GridStrategyConfig.GridLevel sellLevel = new GridStrategyConfig.GridLevel(
-                    bestAsk.getPrice(),
-                    size,
-                    GridStrategyConfig.OrderSide.SELL
-            );
-            String sellOrderId = edgeXClient.placeOrder(new GridStrategyConfig.Order(
-                    thirdAccountId,
-                    contractId,
-                    GridStrategyConfig.OrderSide.SELL,
-                    GridStrategyConfig.OrderType.LIMIT,
-                    size,
-                    bestAsk.getPrice(),
-                    GridStrategyConfig.leverage
-            ));
-            if (sellOrderId != null) {
-                sellLevel.setOrderId(sellOrderId);
-                gridMgr.addPendingOrder(sellOrderId, sellLevel);
-                gridMgr.updateOrderTime();
-            }
+            gridMgr.setBuyGrids(newBuyGrids);
+            gridMgr.setSellGrids(newSellGrids);
         } catch (Exception e) {
             log.error("hedge generate paired orders error: {}, {}", thirdAccountId, contractId, e);
         }
