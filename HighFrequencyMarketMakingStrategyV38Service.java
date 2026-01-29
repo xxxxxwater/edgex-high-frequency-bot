@@ -141,6 +141,7 @@ public class HighFrequencyMarketMakingStrategyV38Service {
         try {
             BigDecimal last_mid_price = new BigDecimal(priceStr);
             long last_update_time = Long.parseLong(timeStr);
+            long now = System.currentTimeMillis() / 1000;
 
             // 价格偏离过大
             if (last_mid_price.compareTo(BigDecimal.ZERO) > 0) {
@@ -148,13 +149,16 @@ public class HighFrequencyMarketMakingStrategyV38Service {
                         .abs()
                         .divide(last_mid_price, 8, RoundingMode.HALF_UP);
                 if (priceDeviation.compareTo(new BigDecimal("0.005")) > 0) { // 偏离0.5%
+                    if (now - last_update_time < GridStrategyConfig.minRefreshIntervalOnDeviation) {
+                        log.info("{},{} 价格偏离触发但刷新间隔过短({}s), 暂不刷新网格", thirdAccountId, contractId, (now - last_update_time));
+                        return false;
+                    }
                     log.info("{},{} 价格偏离过大: {}%, 需要刷新网格", thirdAccountId, contractId, priceDeviation.multiply(new BigDecimal("100")));
                     return true;
                 }
             }
 
             // 定期刷新
-            long now = System.currentTimeMillis() / 1000;
             if (now - last_update_time > GridStrategyConfig.orderRefreshInterval) {
                 log.info("{},{} 超过刷新间隔: {}秒, 需要刷新网格", thirdAccountId, contractId, (now - last_update_time));
                 return true;
@@ -255,6 +259,7 @@ public class HighFrequencyMarketMakingStrategyV38Service {
                 );
 
                 String orderId = edgeXClient.placeOrder(order);
+                sleepApiInterval();
                 if (orderId != null) {
                     gridLevel.setOrderId(orderId);
                     gridMgr.addPendingOrder(orderId, gridLevel); // <-- 修正：Redis Hash 操作
@@ -288,6 +293,7 @@ public class HighFrequencyMarketMakingStrategyV38Service {
                 );
 
                 String orderSellId = edgeXClient.placeOrder(orderSell);
+                sleepApiInterval();
                 if (orderSellId != null) {
                     gridSellLevel.setOrderId(orderSellId);
                     gridMgr.addPendingOrder(orderSellId, gridSellLevel); // <-- 修正：Redis Hash 操作

@@ -17,7 +17,8 @@ import lombok.extern.slf4j.Slf4j;
 @Component
 public class VariationalHedgingStrategyV38Service {
 
-    private static final BigDecimal NET_EXPOSURE_LIMIT_PCT = new BigDecimal("0.05");
+    private static final BigDecimal NET_EXPOSURE_LIMIT_PCT = new BigDecimal("0.08");
+    private static final BigDecimal MIN_HEDGE_NOTIONAL = new BigDecimal("50");
 
     @Resource
     EdgeXClient edgeXClient;
@@ -187,17 +188,20 @@ public class VariationalHedgingStrategyV38Service {
         try {
             BigDecimal lastMid = new BigDecimal(priceStr);
             long lastUpdate = Long.parseLong(timeStr);
+            long now = System.currentTimeMillis() / 1000;
 
             if (lastMid.compareTo(BigDecimal.ZERO) > 0) {
                 BigDecimal deviation = currentPrice.subtract(lastMid)
                         .abs()
                         .divide(lastMid, 8, RoundingMode.HALF_UP);
                 if (deviation.compareTo(new BigDecimal("0.005")) > 0) {
+                    if (now - lastUpdate < GridStrategyConfig.minRefreshIntervalOnDeviation) {
+                        return false;
+                    }
                     return true;
                 }
             }
 
-            long now = System.currentTimeMillis() / 1000;
             if (now - lastUpdate > GridStrategyConfig.orderRefreshInterval) {
                 return true;
             }
@@ -264,6 +268,7 @@ public class VariationalHedgingStrategyV38Service {
                     bestBid.getPrice(),
                     GridStrategyConfig.leverage
             ));
+            sleepApiInterval();
             if (buyOrderId != null) {
                 buyLevel.setOrderId(buyOrderId);
                 gridMgr.addPendingOrder(buyOrderId, buyLevel);
@@ -288,6 +293,7 @@ public class VariationalHedgingStrategyV38Service {
                     bestAsk.getPrice(),
                     GridStrategyConfig.leverage
             ));
+            sleepApiInterval();
             if (sellOrderId != null) {
                 sellLevel.setOrderId(sellOrderId);
                 gridMgr.addPendingOrder(sellOrderId, sellLevel);
@@ -302,6 +308,10 @@ public class VariationalHedgingStrategyV38Service {
                                     BigDecimal midPrice, GridStrategyConfig.OrderBook orderBook,
                                     GridStrategyConfig.OrderSide side, BigDecimal hedgeNotional) {
         try {
+            if (hedgeNotional.compareTo(MIN_HEDGE_NOTIONAL) < 0) {
+                log.info("hedge notional below min, skip: {}, {}, {}", thirdAccountId, contractId, hedgeNotional);
+                return;
+            }
             GridStrategyConfig.OrderBook.Level bestBid = orderBook.getBestBid();
             GridStrategyConfig.OrderBook.Level bestAsk = orderBook.getBestAsk();
             if (bestBid == null || bestAsk == null) {
@@ -310,7 +320,8 @@ public class VariationalHedgingStrategyV38Service {
 
             BigDecimal price = side == GridStrategyConfig.OrderSide.BUY ? bestBid.getPrice() : bestAsk.getPrice();
             BigDecimal minSize = GridStrategyConfig.getMinOrderSize(contractId);
-            BigDecimal size = hedgeNotional.divide(midPrice, 8, RoundingMode.HALF_UP);
+            BigDecimal size = hedgeNotional.divide(midPrice, 8, RoundingMode.HALF_UP)
+                    .multiply(new BigDecimal("0.5"));
             if (size.compareTo(minSize) < 0) {
                 size = minSize;
             }
@@ -329,6 +340,7 @@ public class VariationalHedgingStrategyV38Service {
                     price,
                     GridStrategyConfig.leverage
             ));
+            sleepApiInterval();
             if (orderId != null) {
                 level.setOrderId(orderId);
                 gridMgr.addPendingOrder(orderId, level);
