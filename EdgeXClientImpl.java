@@ -57,6 +57,9 @@ public class EdgeXClientImpl implements EdgeXClient {
     private static final String CODE = "SUCCESS";
     private static final String GET = "GET";
     private static final String ORDER_SUF = "5";
+    private static final long MIN_ORDER_INTERVAL_MS = 1100; // EdgeX: 2 ops per 2 seconds
+    private static final Object ORDER_RATE_LOCK = new Object();
+    private static long lastOrderTs = 0L;
 
     @Resource
     AccountKeyMapper accountKeyMapper;
@@ -194,6 +197,7 @@ public class EdgeXClientImpl implements EdgeXClient {
         request.setOrderType(orderTypeEnum);
         request.setTargetPrice(new BigDecimal(targetPrice).stripTrailingZeros());
         OrderResponse orderResponse;
+        throttleCreateOrder();
         if (Objects.equals(orderTypeEnum, OrderTypeEnum.MARKET)) {
             orderResponse = EdgeXApiClient.createMarketOrder(request);
         } else {
@@ -207,6 +211,21 @@ public class EdgeXClientImpl implements EdgeXClient {
         odr.setThirdOrderId(orderResponse.getOrderId());
         orderMapper.updateById(odr);
         return orderResponse.getOrderId();
+    }
+
+    private static void throttleCreateOrder() {
+        synchronized (ORDER_RATE_LOCK) {
+            long now = System.currentTimeMillis();
+            long waitMs = MIN_ORDER_INTERVAL_MS - (now - lastOrderTs);
+            if (waitMs > 0) {
+                try {
+                    Thread.sleep(waitMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            lastOrderTs = System.currentTimeMillis();
+        }
     }
 
 

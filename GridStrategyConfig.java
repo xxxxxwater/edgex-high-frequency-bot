@@ -35,6 +35,7 @@ public class GridStrategyConfig implements Serializable {
 
     // 订单管理
     public static final int orderRefreshInterval = 120; // 订单刷新间隔（秒）
+    public static final int minRefreshIntervalOnDeviation = 30; // 价格偏离触发刷新时的最小间隔（秒）
     public static final double minOrderInterval = 2.5; // 最小下单间隔（秒）
     public static final int maxOpenOrders = 30; // 最大挂单数量
     public static final double apiCallInterval = 2.6; // API调用间隔（秒），必须 >= minOrderInterval
@@ -46,10 +47,10 @@ public class GridStrategyConfig implements Serializable {
     private static Map<String, BigDecimal> MIN_ORDER_SIZES = Collections.unmodifiableMap(new HashMap<String, BigDecimal>() {{
         put("10000001", new BigDecimal("0.002"));//BTCUSD
         put("10000002", new BigDecimal("0.04"));//ETHUSD
-        put("10000003", new BigDecimal("0.6"));//SOLUSD
-        put("10000004", new BigDecimal("0.01"));//GRID-04
-        put("10000005", new BigDecimal("0.01"));//GRID-05
-        put("10000006", new BigDecimal("0.01"));//GRID-06
+        put("10000003", new BigDecimal("1.2"));//SOLUSD
+        put("10000004", new BigDecimal("0.02"));//GRID-04
+        put("10000005", new BigDecimal("0.02"));//GRID-05
+        put("10000006", new BigDecimal("0.02"));//GRID-06
         put("10000064", new BigDecimal("0.2"));//BNBUSD
     }});
 
