@@ -5,6 +5,7 @@ import java.math.RoundingMode;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -17,8 +18,15 @@ import lombok.extern.slf4j.Slf4j;
 @Component
 public class VariationalHedgingStrategyV38Service {
 
-    private static final BigDecimal NET_EXPOSURE_LIMIT_PCT = new BigDecimal("0.08");
     private static final BigDecimal MIN_HEDGE_NOTIONAL = new BigDecimal("50");
+    private static final BigDecimal OPEN_EQUITY_CHANGE_PCT = new BigDecimal("0.01");
+    private static final BigDecimal EXIT_TAKE_PROFIT_PCT = new BigDecimal("0.01");
+    private static final BigDecimal EXIT_STOP_LOSS_PCT = new BigDecimal("-0.02");
+    private static final long EQUITY_SAMPLE_INTERVAL_SEC = 15 * 60;
+
+    private final Map<String, BigDecimal> lastEquityMap = new ConcurrentHashMap<>();
+    private final Map<String, Long> lastEquityTsMap = new ConcurrentHashMap<>();
+    private final Map<String, BigDecimal> lastEquityChangePctMap = new ConcurrentHashMap<>();
 
     @Resource
     EdgeXClient edgeXClient;
@@ -28,7 +36,7 @@ public class VariationalHedgingStrategyV38Service {
 
     public void executeStrategy(List<String> thirdAccountIds, List<String> contractIdList) {
         GridStrategyConfig config = new GridStrategyConfig();
-        if (contractIdList == null || contractIdList.isEmpty()) {
+        if (contractIdList == null || contractIdList.size() < 2) {
             return;
         }
 
@@ -70,65 +78,55 @@ public class VariationalHedgingStrategyV38Service {
                     continue;
                 }
 
-                Map<String, BigDecimal> posMap = new HashMap<>();
-                BigDecimal netExposure = BigDecimal.ZERO;
-                for (String contractId : contractIdList) {
-                    BigDecimal pos = getHedgePosition(thirdAccountId, contractId);
-                    BigDecimal midPrice = midPriceMap.get(contractId);
-                    if (midPrice == null) {
-                        continue;
-                    }
-                    posMap.put(contractId, pos);
-                    netExposure = netExposure.add(pos.multiply(midPrice));
+                String[] pairContracts = selectPairContracts(contractIdList, orderBookMap, midPriceMap);
+                if (pairContracts == null) {
+                    log.warn("hedge skip, pair contracts not ready: {}, {}", thirdAccountId, contractIdList);
+                    continue;
                 }
 
-                BigDecimal exposureLimit = equity.multiply(NET_EXPOSURE_LIMIT_PCT);
-                boolean needHedge = netExposure.abs().compareTo(exposureLimit) > 0;
+                String contractA = pairContracts[0];
+                String contractB = pairContracts[1];
+                SymbolGridManager gridA = gridMgrMap.get(contractA);
+                SymbolGridManager gridB = gridMgrMap.get(contractB);
+                GridStrategyConfig.OrderBook bookA = orderBookMap.get(contractA);
+                GridStrategyConfig.OrderBook bookB = orderBookMap.get(contractB);
+                BigDecimal midA = midPriceMap.get(contractA);
+                BigDecimal midB = midPriceMap.get(contractB);
+                if (gridA == null || gridB == null || bookA == null || bookB == null || midA == null || midB == null) {
+                    continue;
+                }
 
-                if (needHedge) {
-                    String hedgeContractId = selectHedgeContract(netExposure, contractIdList, posMap, midPriceMap);
-                    if (hedgeContractId != null) {
-                        SymbolGridManager gridMgr = gridMgrMap.get(hedgeContractId);
-                        GridStrategyConfig.OrderBook orderBook = orderBookMap.get(hedgeContractId);
-                        BigDecimal midPrice = midPriceMap.get(hedgeContractId);
-                        if (gridMgr != null && orderBook != null && midPrice != null) {
-                            BigDecimal hedgeNotional = netExposure.abs().subtract(exposureLimit);
-                            if (hedgeNotional.compareTo(BigDecimal.ZERO) > 0) {
-                                GridStrategyConfig.OrderSide side = netExposure.compareTo(BigDecimal.ZERO) > 0
-                                        ? GridStrategyConfig.OrderSide.SELL
-                                        : GridStrategyConfig.OrderSide.BUY;
+                BigDecimal posA = getHedgePosition(thirdAccountId, contractA);
+                BigDecimal posB = getHedgePosition(thirdAccountId, contractB);
+                boolean hasPosition = posA.signum() != 0 || posB.signum() != 0;
 
-                                generateHedgeOrder(thirdAccountId, gridMgr, hedgeContractId, midPrice, orderBook, side, hedgeNotional);
+                EquitySample equitySample = sampleEquityChange(thirdAccountId, equity);
+                if (equitySample.updated) {
+                    if (hasPosition && shouldExitPair(equitySample.pctChange)) {
+                        sleepApiInterval();
+                        cancelOpenOrders(gridA, thirdAccountId, contractA);
+                        sleepApiInterval();
+                        cancelOpenOrders(gridB, thirdAccountId, contractB);
 
-                                String key = hedgeKey(thirdAccountId, hedgeContractId, "last_mid_price");
-                                stringRedisTemplate.opsForValue().set(key, midPrice.toPlainString());
-                                stringRedisTemplate.opsForValue().set(key + ":last_update_time", String.valueOf(System.currentTimeMillis() / 1000));
-                            }
-                        }
-                    }
-                } else {
-                    for (String contractId : contractIdList) {
-                        SymbolGridManager gridMgr = gridMgrMap.get(contractId);
-                        GridStrategyConfig.OrderBook orderBook = orderBookMap.get(contractId);
-                        BigDecimal midPrice = midPriceMap.get(contractId);
-                        if (gridMgr == null || orderBook == null || midPrice == null) {
-                            continue;
-                        }
-
-                        boolean shouldRefresh = shouldRefreshGrid(thirdAccountId, contractId, midPrice);
-                        if (shouldRefresh) {
+                        sleepApiInterval();
+                        closePairPositions(thirdAccountId, gridA, contractA, bookA, posA);
+                        sleepApiInterval();
+                        closePairPositions(thirdAccountId, gridB, contractB, bookB, posB);
+                    } else if (!hasPosition && shouldOpenPair(equitySample.pctChange)) {
+                        if (!hasPendingOrders(gridA) && !hasPendingOrders(gridB)) {
                             sleepApiInterval();
-                            cancelOpenOrders(gridMgr, thirdAccountId, contractId);
-
-                            sleepApiInterval();
-                            generatePairedOrders(thirdAccountId, gridMgr, contractId, midPrice, orderBook);
-
-                            String key = hedgeKey(thirdAccountId, contractId, "last_mid_price");
-                            stringRedisTemplate.opsForValue().set(key, midPrice.toPlainString());
-                            stringRedisTemplate.opsForValue().set(key + ":last_update_time", String.valueOf(System.currentTimeMillis() / 1000));
+                            openPairPositions(thirdAccountId, gridA, contractA, bookA, midA,
+                                    gridB, contractB, bookB, midB, equitySample.pctChange, equity);
                         }
                     }
                 }
+
+                String keyA = hedgeKey(thirdAccountId, contractA, "last_mid_price");
+                stringRedisTemplate.opsForValue().set(keyA, midA.toPlainString());
+                stringRedisTemplate.opsForValue().set(keyA + ":last_update_time", String.valueOf(System.currentTimeMillis() / 1000));
+                String keyB = hedgeKey(thirdAccountId, contractB, "last_mid_price");
+                stringRedisTemplate.opsForValue().set(keyB, midB.toPlainString());
+                stringRedisTemplate.opsForValue().set(keyB + ":last_update_time", String.valueOf(System.currentTimeMillis() / 1000));
 
                 for (String contractId : contractIdList) {
                     SymbolGridManager gridMgr = gridMgrMap.get(contractId);
@@ -143,74 +141,26 @@ public class VariationalHedgingStrategyV38Service {
         }
     }
 
-    private String selectHedgeContract(BigDecimal netExposure, List<String> contractIdList,
-                                      Map<String, BigDecimal> posMap, Map<String, BigDecimal> midPriceMap) {
-        BigDecimal bestNotional = BigDecimal.ZERO;
-        String bestContract = null;
+    private String[] selectPairContracts(List<String> contractIdList,
+                                         Map<String, GridStrategyConfig.OrderBook> orderBookMap,
+                                         Map<String, BigDecimal> midPriceMap) {
+        String first = null;
+        String second = null;
         for (String contractId : contractIdList) {
-            BigDecimal pos = posMap.getOrDefault(contractId, BigDecimal.ZERO);
-            BigDecimal mid = midPriceMap.get(contractId);
-            if (mid == null) {
+            if (orderBookMap.get(contractId) == null || midPriceMap.get(contractId) == null) {
                 continue;
             }
-            BigDecimal notional = pos.multiply(mid);
-            boolean isCandidate = netExposure.compareTo(BigDecimal.ZERO) > 0
-                    ? notional.compareTo(BigDecimal.ZERO) > 0
-                    : notional.compareTo(BigDecimal.ZERO) < 0;
-            if (isCandidate) {
-                BigDecimal absNotional = notional.abs();
-                if (absNotional.compareTo(bestNotional) > 0) {
-                    bestNotional = absNotional;
-                    bestContract = contractId;
-                }
+            if (first == null) {
+                first = contractId;
+            } else {
+                second = contractId;
+                break;
             }
         }
-        if (bestContract == null && !contractIdList.isEmpty()) {
-            bestContract = contractIdList.get(0);
+        if (first == null || second == null) {
+            return null;
         }
-        return bestContract;
-    }
-
-    private boolean shouldRefreshGrid(String thirdAccountId, String contractId, BigDecimal currentPrice) {
-        int pendingOrdersCount = edgeXClient.pendingOrders(thirdAccountId, contractId);
-        if (pendingOrdersCount == 0) {
-            return true;
-        }
-
-        String key = hedgeKey(thirdAccountId, contractId, "last_mid_price");
-        String priceStr = stringRedisTemplate.opsForValue().get(key);
-        String timeStr = stringRedisTemplate.opsForValue().get(key + ":last_update_time");
-
-        if (priceStr == null || timeStr == null) {
-            return true;
-        }
-
-        try {
-            BigDecimal lastMid = new BigDecimal(priceStr);
-            long lastUpdate = Long.parseLong(timeStr);
-            long now = System.currentTimeMillis() / 1000;
-
-            if (lastMid.compareTo(BigDecimal.ZERO) > 0) {
-                BigDecimal deviation = currentPrice.subtract(lastMid)
-                        .abs()
-                        .divide(lastMid, 8, RoundingMode.HALF_UP);
-                if (deviation.compareTo(new BigDecimal("0.005")) > 0) {
-                    if (now - lastUpdate < GridStrategyConfig.minRefreshIntervalOnDeviation) {
-                        return false;
-                    }
-                    return true;
-                }
-            }
-
-            if (now - lastUpdate > GridStrategyConfig.orderRefreshInterval) {
-                return true;
-            }
-        } catch (Exception e) {
-            log.error("hedge refresh check error: {}, {}", thirdAccountId, contractId, e);
-            return false;
-        }
-
-        return false;
+        return new String[]{first, second};
     }
 
     private void cancelOpenOrders(SymbolGridManager gridMgr, String thirdAccountId, String contractId) {
@@ -227,89 +177,106 @@ public class VariationalHedgingStrategyV38Service {
         }
     }
 
-    private void generatePairedOrders(String thirdAccountId, SymbolGridManager gridMgr, String contractId,
-                                      BigDecimal midPrice, GridStrategyConfig.OrderBook orderBook) {
+    private void openPairPositions(String thirdAccountId,
+                                   SymbolGridManager gridA, String contractA, GridStrategyConfig.OrderBook bookA, BigDecimal midA,
+                                   SymbolGridManager gridB, String contractB, GridStrategyConfig.OrderBook bookB, BigDecimal midB,
+                                   BigDecimal equityChangePct, BigDecimal equity) {
         try {
-            BigDecimal balance = edgeXClient.getBalance(thirdAccountId, contractId);
-            if (balance.compareTo(BigDecimal.ZERO) <= 0) {
-                log.warn("hedge balance empty: {}, {}", thirdAccountId, contractId);
+            GridStrategyConfig.OrderBook.Level bestBidA = bookA.getBestBid();
+            GridStrategyConfig.OrderBook.Level bestAskA = bookA.getBestAsk();
+            GridStrategyConfig.OrderBook.Level bestBidB = bookB.getBestBid();
+            GridStrategyConfig.OrderBook.Level bestAskB = bookB.getBestAsk();
+            if (bestBidA == null || bestAskA == null || bestBidB == null || bestAskB == null) {
                 return;
             }
 
-            BigDecimal minSize = GridStrategyConfig.getMinOrderSize(contractId);
-            BigDecimal orderValue = balance.multiply(GridStrategyConfig.hedgeOrderSizePct);
-            BigDecimal size = orderValue.divide(midPrice, 8, RoundingMode.HALF_UP);
-            if (size.compareTo(minSize) < 0) {
-                size = minSize;
-            }
-
-            GridStrategyConfig.OrderBook.Level bestBid = orderBook.getBestBid();
-            GridStrategyConfig.OrderBook.Level bestAsk = orderBook.getBestAsk();
-            if (bestBid == null || bestAsk == null) {
-                log.warn("hedge orderbook invalid: {}, {}", thirdAccountId, contractId);
+            if (!gridA.canPlaceOrder() || !gridB.canPlaceOrder()) {
                 return;
             }
 
-            if (!gridMgr.canPlaceOrder()) {
+            BigDecimal notional = equity.multiply(GridStrategyConfig.hedgeOrderSizePct);
+            if (notional.compareTo(MIN_HEDGE_NOTIONAL) < 0) {
+                return;
+            }
+
+            BigDecimal minNotionalA = GridStrategyConfig.getMinOrderSize(contractA).multiply(midA);
+            BigDecimal minNotionalB = GridStrategyConfig.getMinOrderSize(contractB).multiply(midB);
+            BigDecimal targetNotional = notional.max(minNotionalA).max(minNotionalB);
+
+            BigDecimal sizeA = targetNotional.divide(midA, 8, RoundingMode.HALF_UP);
+            BigDecimal sizeB = targetNotional.divide(midB, 8, RoundingMode.HALF_UP);
+
+            boolean buyA = equityChangePct.compareTo(BigDecimal.ZERO) >= 0;
+            String buyContract = buyA ? contractA : contractB;
+            String sellContract = buyA ? contractB : contractA;
+            SymbolGridManager buyMgr = buyA ? gridA : gridB;
+            SymbolGridManager sellMgr = buyA ? gridB : gridA;
+            GridStrategyConfig.OrderBook buyBook = buyA ? bookA : bookB;
+            GridStrategyConfig.OrderBook sellBook = buyA ? bookB : bookA;
+            BigDecimal buySize = buyA ? sizeA : sizeB;
+            BigDecimal sellSize = buyA ? sizeB : sizeA;
+
+            GridStrategyConfig.OrderBook.Level buyBid = buyBook.getBestBid();
+            GridStrategyConfig.OrderBook.Level sellAsk = sellBook.getBestAsk();
+            if (buyBid == null || sellAsk == null) {
                 return;
             }
 
             GridStrategyConfig.GridLevel buyLevel = new GridStrategyConfig.GridLevel(
-                    bestBid.getPrice(),
-                    size,
+                    buyBid.getPrice(),
+                    buySize,
                     GridStrategyConfig.OrderSide.BUY
             );
             String buyOrderId = edgeXClient.placeOrder(new GridStrategyConfig.Order(
                     thirdAccountId,
-                    contractId,
+                    buyContract,
                     GridStrategyConfig.OrderSide.BUY,
                     GridStrategyConfig.OrderType.LIMIT,
-                    size,
-                    bestBid.getPrice(),
+                    buySize,
+                    buyBid.getPrice(),
                     GridStrategyConfig.leverage
             ));
             sleepApiInterval();
-            if (buyOrderId != null) {
-                buyLevel.setOrderId(buyOrderId);
-                gridMgr.addPendingOrder(buyOrderId, buyLevel);
-                gridMgr.updateOrderTime();
-            }
-
-            if (!gridMgr.canPlaceOrder()) {
+            if (buyOrderId == null) {
                 return;
             }
+            buyLevel.setOrderId(buyOrderId);
+            buyMgr.addPendingOrder(buyOrderId, buyLevel);
+            buyMgr.updateOrderTime();
 
             GridStrategyConfig.GridLevel sellLevel = new GridStrategyConfig.GridLevel(
-                    bestAsk.getPrice(),
-                    size,
+                    sellAsk.getPrice(),
+                    sellSize,
                     GridStrategyConfig.OrderSide.SELL
             );
             String sellOrderId = edgeXClient.placeOrder(new GridStrategyConfig.Order(
                     thirdAccountId,
-                    contractId,
+                    sellContract,
                     GridStrategyConfig.OrderSide.SELL,
                     GridStrategyConfig.OrderType.LIMIT,
-                    size,
-                    bestAsk.getPrice(),
+                    sellSize,
+                    sellAsk.getPrice(),
                     GridStrategyConfig.leverage
             ));
             sleepApiInterval();
-            if (sellOrderId != null) {
-                sellLevel.setOrderId(sellOrderId);
-                gridMgr.addPendingOrder(sellOrderId, sellLevel);
-                gridMgr.updateOrderTime();
+            if (sellOrderId == null) {
+                sleepApiInterval();
+                edgeXClient.cancelOrder(thirdAccountId, buyContract, buyOrderId);
+                buyMgr.removePendingOrder(buyOrderId);
+                return;
             }
+            sellLevel.setOrderId(sellOrderId);
+            sellMgr.addPendingOrder(sellOrderId, sellLevel);
+            sellMgr.updateOrderTime();
         } catch (Exception e) {
-            log.error("hedge generate paired orders error: {}, {}", thirdAccountId, contractId, e);
+            log.error("hedge open pair error: {}, {}", thirdAccountId, contractA + "/" + contractB, e);
         }
     }
 
-    private void generateHedgeOrder(String thirdAccountId, SymbolGridManager gridMgr, String contractId,
-                                    BigDecimal midPrice, GridStrategyConfig.OrderBook orderBook,
-                                    GridStrategyConfig.OrderSide side, BigDecimal hedgeNotional) {
+    private void closePairPositions(String thirdAccountId, SymbolGridManager gridMgr, String contractId,
+                                    GridStrategyConfig.OrderBook orderBook, BigDecimal position) {
         try {
-            if (hedgeNotional.compareTo(MIN_HEDGE_NOTIONAL) < 0) {
-                log.info("hedge notional below min, skip: {}, {}, {}", thirdAccountId, contractId, hedgeNotional);
+            if (position.signum() == 0) {
                 return;
             }
             GridStrategyConfig.OrderBook.Level bestBid = orderBook.getBestBid();
@@ -317,18 +284,14 @@ public class VariationalHedgingStrategyV38Service {
             if (bestBid == null || bestAsk == null) {
                 return;
             }
-
-            BigDecimal price = side == GridStrategyConfig.OrderSide.BUY ? bestBid.getPrice() : bestAsk.getPrice();
-            BigDecimal minSize = GridStrategyConfig.getMinOrderSize(contractId);
-            BigDecimal size = hedgeNotional.divide(midPrice, 8, RoundingMode.HALF_UP)
-                    .multiply(new BigDecimal("0.5"));
-            if (size.compareTo(minSize) < 0) {
-                size = minSize;
-            }
-
             if (!gridMgr.canPlaceOrder()) {
                 return;
             }
+            GridStrategyConfig.OrderSide side = position.signum() > 0
+                    ? GridStrategyConfig.OrderSide.SELL
+                    : GridStrategyConfig.OrderSide.BUY;
+            BigDecimal size = position.abs();
+            BigDecimal price = side == GridStrategyConfig.OrderSide.BUY ? bestBid.getPrice() : bestAsk.getPrice();
 
             GridStrategyConfig.GridLevel level = new GridStrategyConfig.GridLevel(price, size, side);
             String orderId = edgeXClient.placeOrder(new GridStrategyConfig.Order(
@@ -347,7 +310,7 @@ public class VariationalHedgingStrategyV38Service {
                 gridMgr.updateOrderTime();
             }
         } catch (Exception e) {
-            log.error("hedge generate order error: {}, {}", thirdAccountId, contractId, e);
+            log.error("hedge close order error: {}, {}", thirdAccountId, contractId, e);
         }
     }
 
@@ -390,6 +353,41 @@ public class VariationalHedgingStrategyV38Service {
         stringRedisTemplate.opsForValue().set(hedgePosKey(thirdAccountId, contractId), updated.toPlainString());
     }
 
+    private boolean shouldOpenPair(BigDecimal equityChangePct) {
+        return equityChangePct.compareTo(OPEN_EQUITY_CHANGE_PCT) >= 0;
+    }
+
+    private boolean shouldExitPair(BigDecimal equityChangePct) {
+        return equityChangePct.compareTo(EXIT_TAKE_PROFIT_PCT) >= 0
+                || equityChangePct.compareTo(EXIT_STOP_LOSS_PCT) <= 0;
+    }
+
+    private boolean hasPendingOrders(SymbolGridManager gridMgr) {
+        Map<String, GridStrategyConfig.GridLevel> pendingOrders = gridMgr.getAllPendingOrders();
+        return pendingOrders != null && !pendingOrders.isEmpty();
+    }
+
+    private EquitySample sampleEquityChange(String thirdAccountId, BigDecimal currentEquity) {
+        long now = System.currentTimeMillis() / 1000;
+        Long lastTs = lastEquityTsMap.get(thirdAccountId);
+        BigDecimal lastEquity = lastEquityMap.get(thirdAccountId);
+        if (lastTs == null || lastEquity == null || lastEquity.compareTo(BigDecimal.ZERO) <= 0) {
+            lastEquityMap.put(thirdAccountId, currentEquity);
+            lastEquityTsMap.put(thirdAccountId, now);
+            return new EquitySample(BigDecimal.ZERO, false);
+        }
+        if (now - lastTs < EQUITY_SAMPLE_INTERVAL_SEC) {
+            BigDecimal cached = lastEquityChangePctMap.getOrDefault(thirdAccountId, BigDecimal.ZERO);
+            return new EquitySample(cached, false);
+        }
+        BigDecimal pct = currentEquity.subtract(lastEquity)
+                .divide(lastEquity, 8, RoundingMode.HALF_UP);
+        lastEquityMap.put(thirdAccountId, currentEquity);
+        lastEquityTsMap.put(thirdAccountId, now);
+        lastEquityChangePctMap.put(thirdAccountId, pct);
+        return new EquitySample(pct, true);
+    }
+
     private String hedgeKey(String thirdAccountId, String contractId, String suffix) {
         return "hedge:strategy:" + thirdAccountId + ":" + contractId + ":" + suffix;
     }
@@ -403,6 +401,16 @@ public class VariationalHedgingStrategyV38Service {
             Thread.sleep((long) (GridStrategyConfig.apiCallInterval * 1000));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private static class EquitySample {
+        private final BigDecimal pctChange;
+        private final boolean updated;
+
+        private EquitySample(BigDecimal pctChange, boolean updated) {
+            this.pctChange = pctChange;
+            this.updated = updated;
         }
     }
 }
