@@ -1,97 +1,170 @@
-# EdgeX High-Frequency Bot (Variational Hedging + Grid)
+# EdgeX High-Frequency Trading Bot
 
-## Overview
-This repository contains strategy modules for an EdgeX-based high‑frequency trading system. It combines:
+A production-oriented Python trading bot for EdgeX / PerpDEX-style perpetual markets. The system is designed around async execution, multi-symbol monitoring, risk-controlled order flow, real-time observability, Docker-based deployment, and operational safety.
 
-- **Grid market‑making** to harvest short‑term volatility on selected symbols.
-- **Variational hedging** to control net exposure and sustain trading volume on core symbols.
+> This repository is an engineering portfolio project. It demonstrates trading infrastructure, exchange API integration, risk controls, async Python architecture, monitoring, and deployment discipline. It is not financial advice.
 
-The code here is **not a standalone application**. It is a set of Spring components that must be integrated into the larger trading platform (Spring Boot runtime, Redis, database mappers, and EdgeX API clients).
+## Highlights
 
-## Strategy Composition
-The orchestrator is `StrategyManager`, which schedules both strategies in a single loop:
+- Multi-symbol perpetual futures trading bot for BTC, ETH, SOL, BNB and other supported markets
+- Async Python architecture using `asyncio` for concurrent market data, signal evaluation, order flow, and monitoring
+- Mean-reversion strategy engine using fast moving-average deviation logic
+- Risk controls for position sizing, minimum order size, stop-loss / take-profit behavior, and execution safety
+- WebSocket / API client layer for real-time exchange interaction
+- Docker and docker-compose deployment for repeatable production operation
+- Monitoring and logging modules for live diagnostics, performance reporting, and incident response
+- Environment-based configuration with `.env.example` for safer key management
 
-- **Grid strategy**: `HighFrequencyMarketMakingStrategyV38Service`
-  - Runs on **SOL + GRID-04/05/06** by default.
-  - Builds multi‑level buy/sell grids based on configurable spacing and depth.
-  - Tracks pending orders and positions in Redis.
+## Architecture
 
-- **Variational hedging strategy**: `VariationalHedgingStrategyV38Service`
-  - Runs on **BTC/ETH** by default.
-  - Monitors net exposure across the hedge symbols and places offsetting orders when exposure exceeds a threshold.
-  - In normal state (exposure within limits), it places paired buy/sell orders at **best bid/ask** to promote fills.
-
-These symbol sets are **separated** by default, so Redis state does not collide as long as symbols do not overlap.
-
-## Default Symbol Split
-Defined in `StrategyManager`:
-
-- **Grid symbols**: `10000003`, `10000004`, `10000005`, `10000006`
-- **Hedge symbols**: `10000001`, `10000002`
-
-If you change these lists, avoid overlapping contract IDs unless you intentionally want shared Redis state.
-
-## Key Parameters (GridStrategyConfig)
-- `gridLevels`: number of price levels per side (default: 3)
-- `gridSpacingPct`: spacing between levels (default: 0.8%)
-- `positionSizePct`: grid order sizing (default: 9% of balance)
-- `hedgeOrderSizePct`: hedge order sizing (default: 1% of balance)
-- `maxPositionPerSide`: position count cap per side
-- `orderRefreshInterval`, `minOrderInterval`, `apiCallInterval`
-
-## Redis State Model
-State is stored per **account + contract** using the key prefix:
-
-```
-grid:strategy:{accountId}:{contractId}:{suffix}
+```mermaid
+flowchart TD
+  EX[EdgeX / PerpDEX APIs] --> WS[WebSocket Client]
+  EX --> REST[REST / SDK Client]
+  WS --> MD[Market Data Stream]
+  REST --> ACCT[Account + Contract Metadata]
+  MD --> STRAT[Strategy Engine]
+  ACCT --> RISK[Risk Manager]
+  STRAT --> RISK
+  RISK --> EXEC[Order Execution]
+  EXEC --> REST
+  EXEC --> MON[Monitor + Logs]
+  STRAT --> MON
+  MON --> OPS[Operator / Deployment Logs]
 ```
 
-This includes:
-- Pending order hash
-- Buy/Sell grid lists
-- Net position and long/short counters
-- Last order timestamp
+## System design
 
-As long as each contract is exclusive to one strategy, the state remains isolated.
+### Async execution flow
 
-## Execution Flow (High Level)
-1. Scheduler queries active accounts.
-2. Grid strategy refreshes grids when price deviates or orders are depleted.
-3. Hedging strategy computes net exposure on hedge symbols.
-   - If exposure exceeds threshold, it places a hedge order.
-   - Otherwise, it runs normal grid placement on hedge symbols.
-4. Both strategies reconcile fills and update Redis state.
+```mermaid
+sequenceDiagram
+  participant Bot
+  participant MarketData
+  participant Strategy
+  participant Risk
+  participant Exchange
+  participant Monitor
 
-## External Dependencies
-This repo relies on external platform components, including:
+  Bot->>MarketData: Subscribe symbols
+  MarketData->>Strategy: Push latest candles / ticker updates
+  Strategy->>Risk: Generate candidate signal
+  Risk->>Risk: Check position size, min order, stop-loss, exposure
+  Risk->>Exchange: Submit order if allowed
+  Exchange-->>Bot: Order status / fills
+  Bot->>Monitor: Emit metrics, logs, and trade report
+```
 
-- Spring (`@Component`, DI)
-- Redis (`StringRedisTemplate`)
-- DB mappers (`AccountKeyMapper`, `OrderMapper`, `ThirdContractMapper`)
-- EdgeX API client (`EdgeXApiClient`)
-- Shared domain classes under `com.tradez.*`
+## Repository map
 
-It will not compile or run by itself without the full platform.
+| Path | Purpose |
+|---|---|
+| `main.py` | Main bot runtime entrypoint |
+| `start.py` | Startup wrapper and environment bootstrap |
+| `strategy.py` | Trading signal logic and strategy behavior |
+| `edgex_client.py` | Exchange API / SDK integration layer |
+| `websocket_client.py` | Real-time market data streaming client |
+| `monitor.py` | Runtime metrics, logs, and performance reporting |
+| `config.py` | Core runtime configuration |
+| `config_manager.py` | Config loading and validation logic |
+| `Dockerfile` | Container image definition |
+| `docker-compose.yml` | One-command deployment setup |
+| `.env.example` | Environment variable template |
+| `tests / test_*.py` | Functional and integration-style test scripts |
 
-## Safety Notes
-- Avoid running both strategies on the **same contract ID** unless you intend to share state.
-- Enforce correct API rate limits using `apiCallInterval` and `minOrderInterval`.
-- Position and exposure controls are enforced via Redis‑tracked counters, not via direct exchange position queries.
+## Strategy overview
 
-## How to Integrate
-1. Place these modules into the main Spring project with required dependencies.
-2. Ensure Redis and database connectivity are configured.
-3. Wire `StrategyManager.start()` from a controller or startup hook.
-4. Verify contract lists and risk parameters for your deployment.
+The current strategy is a fast-start mean-reversion engine:
 
-## File Map
-- `StrategyManager.java`: scheduler + contract split
-- `HighFrequencyMarketMakingStrategyV38Service.java`: grid logic
-- `VariationalHedgingStrategyV38Service.java`: hedge logic
-- `SymbolGridManager.java`: Redis state tracking
-- `EdgeXClient.java` / `EdgeXClientImpl.java`: exchange API adapter
-- `GridStrategyConfig.java`: parameters and models
-- `JsonUtil.java`: Redis serialization helper
+1. Pull recent K-line / candle data per symbol.
+2. Calculate a short moving average baseline.
+3. Detect price deviation from the moving average.
+4. Open long or short exposure when deviation crosses a threshold.
+5. Manage position with fixed sizing and configured take-profit / stop-loss behavior.
+6. Monitor runtime state and execution logs continuously.
 
-## License
-No license file is included. All usage should comply with the owning organization’s policies.
+This simple strategy is useful as an engineering testbed because it exercises market data, signal generation, risk checks, order placement, and monitoring under a realistic event loop.
+
+## Risk controls
+
+The bot includes multiple layers of operational and trading safety:
+
+- Per-symbol position sizing to avoid overconcentration
+- Minimum order size checks per market
+- Take-profit and stop-loss parameters
+- Contract ID caching to reduce repeated metadata lookups
+- Runtime logging for every major decision path
+- Dockerized deployment to reduce environment drift
+- Environment variables for API credentials instead of hardcoded secrets
+- Monitoring reports for diagnosis and live operation
+
+Recommended future hardening:
+
+- Global max drawdown guard
+- Max daily loss circuit breaker
+- Exchange outage / degraded-mode detection
+- Slippage guard before order submission
+- Backtest and paper-trading modes
+- Prometheus metrics endpoint
+- Structured JSON logs
+
+## Docker deployment
+
+```bash
+cp .env.example .env
+# edit API keys and trading parameters
+
+docker compose up -d --build
+
+docker compose logs -f
+```
+
+## Local development
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python main.py
+```
+
+## Operations checklist
+
+Before running live:
+
+- Confirm API key permissions and withdrawal restrictions
+- Start with reduced position size
+- Verify symbol contract IDs and minimum order sizes
+- Confirm stop-loss and take-profit parameters
+- Run dry-run or tiny-size execution first
+- Monitor logs during startup and first signal cycle
+- Keep `.env` out of Git
+
+## Screenshots
+
+Add screenshots under `assets/screenshots/`:
+
+- Runtime console output
+- Docker deployment status
+- Monitoring / trade report output
+- Example config screen
+
+```md
+![Runtime logs](assets/screenshots/runtime-logs.png)
+![Docker deployment](assets/screenshots/docker-deploy.png)
+```
+
+## Portfolio positioning
+
+This project demonstrates:
+
+- Trading system engineering
+- Async Python architecture
+- Exchange API integration
+- Real-time bot operation
+- Risk-aware execution workflows
+- Dockerized production deployment
+- Operational monitoring and troubleshooting
+
+It is especially relevant to AI trading, quant infrastructure, crypto trading systems, and high-ownership startup engineering roles.
