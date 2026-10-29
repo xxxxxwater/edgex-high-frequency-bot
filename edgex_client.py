@@ -77,56 +77,28 @@ class EdgeXClient:
             raise
     
     async def get_account_info(self) -> AccountInfo:
-        """获取账户信息"""
+        """
+        获取账户信息
+        
+        字段结构以官方 SDK 为准（edgex-golang-sdk sdk/account/types.go 的 AccountAssetData）：
+        - 余额在 data.collateralAssetModelList[].totalEquity / availableBalance；
+        - 持仓在 data.positionList[]，openSize 为带符号的持仓数量（正=多，负=空），
+          openValue 为开仓价值，没有 positionSide / positionSize / avgEntryPrice 字段。
+        之前按 data.totalEquity、positionSize 解析：余额恒为 0、持仓恒为空。
+        
+        响应缺少关键字段时直接抛出异常（策略会暂停本轮交易），
+        而不是当作"余额 0 / 无持仓"处理——后者会让策略在已有持仓时继续开仓。
+        """
         try:
-            # 获取账户资产
+            # getAccountAsset 同时返回余额和持仓（SDK 的 get_account_positions 调用的是同一个接口）
             asset_response = await self.sdk_client.account.get_account_asset()
             
             if not asset_response or asset_response.get("code") != "SUCCESS":
                 raise ValueError(f"获取账户资产失败: {asset_response}")
             
-            asset_data = asset_response.get("data", {})
-            
-            # 解析余额
-            balance = float(asset_data.get("totalEquity", 0))
-            available_balance = float(asset_data.get("availableBalance", 0))
-            
-            # 获取持仓信息
-            positions = {}
-            positions_response = await self.sdk_client.account.get_account_positions()
-            
-            if positions_response and positions_response.get("code") == "SUCCESS":
-                position_list = positions_response.get("data", {}).get("positionList", [])
-                
-                for pos_data in position_list:
-                    contract_id = pos_data.get("contractId", "")
-                    if not contract_id:
-                        continue
-                    
-                    # 解析方向
-                    position_side = pos_data.get("positionSide", "LONG")
-                    if position_side == "LONG":
-                        direction = TradeDirection.LONG
-                    elif position_side == "SHORT":
-                        direction = TradeDirection.SHORT
-                    else:
-                        continue
-                    
-                    # 解析持仓大小（可能是负数表示方向）
-                    size = abs(float(pos_data.get("positionSize", 0)))
-                    
-                    if size > 0:  # 只记录有持仓的
-                        position = Position(
-                            symbol=contract_id,
-                            direction=direction,
-                            size=size,
-                            entry_price=float(pos_data.get("avgEntryPrice", 0)),
-                            stop_loss=0.0,  # SDK不直接提供，需要从订单中获取
-                            take_profit=0.0,  # SDK不直接提供，需要从订单中获取
-                            leverage=int(pos_data.get("leverage", 1)),
-                            opening_time=int(pos_data.get("createdTime", 0))
-                        )
-                        positions[contract_id] = position
+            asset_data = asset_response.get("data") or {}
+            balance, available_balance = self._parse_balances(asset_data)
+            positions = self._parse_positions(asset_data)
             
             return AccountInfo(
                 balance=balance,
@@ -137,6 +109,54 @@ class EdgeXClient:
         except Exception as e:
             logger.error(f"获取账户信息失败: {e}")
             raise
+    
+    @staticmethod
+    def _parse_balances(asset_data: Dict[str, Any]):
+        collateral_list = asset_data.get("collateralAssetModelList")
+        if collateral_list:
+            collateral = collateral_list[0]
+        elif "totalEquity" in asset_data:
+            collateral = asset_data
+        else:
+            raise ValueError("账户资产响应缺少 collateralAssetModelList，无法确定余额")
+        
+        equity = collateral.get("totalEquity")
+        available = collateral.get("availableBalance", collateral.get("availableAmount"))
+        if equity is None or available is None:
+            raise ValueError(f"账户资产响应缺少 totalEquity/availableBalance: {collateral}")
+        return float(equity), float(available)
+    
+    def _parse_positions(self, asset_data: Dict[str, Any]) -> Dict[str, Position]:
+        positions = {}
+        for pos_data in asset_data.get("positionList") or []:
+            contract_id = str(pos_data.get("contractId") or "")
+            if not contract_id:
+                continue
+            
+            raw_size = pos_data.get("openSize", pos_data.get("size"))
+            if raw_size is None:
+                raise ValueError(f"持仓数据缺少 openSize，无法确认持仓: {pos_data}")
+            size = Decimal(str(raw_size))
+            if size == 0:
+                continue
+            
+            direction = TradeDirection.LONG if size > 0 else TradeDirection.SHORT
+            open_value = abs(Decimal(str(pos_data.get("openValue") or "0")))
+            entry_price = open_value / abs(size)
+            
+            created_ms = int(pos_data.get("createdTime") or 0)
+            positions[contract_id] = Position(
+                symbol=contract_id,
+                direction=direction,
+                size=float(abs(size)),
+                entry_price=float(entry_price),
+                stop_loss=0.0,  # 接口不提供，由策略按开仓均价计算
+                take_profit=0.0,
+                # 持仓接口不返回杠杆，使用配置值
+                leverage=int(pos_data.get("leverage") or getattr(self.config, "leverage", 1)),
+                opening_time=created_ms // 1000  # 毫秒 -> 秒（TradeRecord.duration 按秒计算）
+            )
+        return positions
     
     async def get_klines(self, symbol: str, interval: str, limit: int) -> List[PriceData]:
         """
