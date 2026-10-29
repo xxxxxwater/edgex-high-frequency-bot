@@ -20,6 +20,7 @@ class TradingBot:
         self.strategy = None
         self.monitor = None
         self.is_running = False
+        self._stop_requested = False
         
         # 设置日志
         self._setup_logging()
@@ -53,10 +54,18 @@ class TradingBot:
         """设置信号处理器"""
         def signal_handler(signum, frame):
             logger.info(f"收到信号 {signum}，准备停止...")
-            self.stop()
+            # 注意：stop() 是协程，在同步的信号处理器里直接调用只会创建一个从未执行的协程对象，
+            # 策略循环不会停止；这里改为同步地请求停止，由 start()/run() 的 finally 负责 await stop()
+            self.request_stop()
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+    
+    def request_stop(self):
+        """同步请求停止（可在信号处理器中安全调用）"""
+        self._stop_requested = True
+        if self.strategy:
+            self.strategy.stop()
     
     async def initialize(self):
         """初始化机器人"""
@@ -145,6 +154,10 @@ class TradingBot:
         """运行机器人"""
         if not await self.initialize():
             logger.error("初始化失败，退出程序")
+            return
+        
+        if self._stop_requested:
+            logger.info("初始化期间收到停止信号，退出程序")
             return
         
         try:
