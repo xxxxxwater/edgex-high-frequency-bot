@@ -6,6 +6,7 @@ EdgeX API客户端
 import asyncio
 import sys
 import os
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from typing import List, Optional, Dict, Any
 from loguru import logger
 
@@ -209,47 +210,125 @@ class EdgeXClient:
         下单
         
         Args:
-            order: 订单对象
+            order: 订单对象（symbol 可以是交易对名称或合约ID）
             
         Returns:
             Dict[str, Any]: 下单响应
         """
         try:
-            # 转换OrderSide
-            if order.side == OrderSide.BUY:
-                sdk_side = SDKOrderSide.BUY
-            else:
-                sdk_side = SDKOrderSide.SELL
+            # 策略传入的是交易对名称（如 "SOL-USDT"），SDK 需要合约ID
+            contract_id = await self.get_contract_id_by_symbol(order.symbol)
+            if not contract_id:
+                raise ValueError(f"无法找到交易对 {order.symbol} 的合约ID")
+            
+            metadata = await self.sdk_client.get_metadata()
+            if not metadata or metadata.get("code") != "SUCCESS":
+                raise ValueError(f"获取元数据失败: {metadata}")
+            metadata_data = metadata.get("data", {})
+            contract = self._find_contract(metadata_data, contract_id)
+            
+            # 转换OrderSide（SDK 内部使用 params.side.value，必须传枚举而不是字符串）
+            sdk_side = SDKOrderSide.BUY if order.side == OrderSide.BUY else SDKOrderSide.SELL
             
             # 转换OrderType
             if order.order_type == OrderType.MARKET:
                 sdk_type = SDKOrderType.MARKET
+                price = await self._market_order_price(contract_id, sdk_side, contract)
             else:
                 sdk_type = SDKOrderType.LIMIT
+                if not order.price or order.price <= 0:
+                    raise ValueError("限价单必须指定价格")
+                price = self._format_price(order.price, contract)
+            
+            size = self._format_size(order.quantity, contract)
             
             # 创建订单参数
             params = CreateOrderParams(
-                contract_id=order.symbol,
-                price=str(order.price) if order.price else "0",
-                size=str(order.quantity),
+                contract_id=contract_id,
+                price=price,
+                size=size,
                 type=sdk_type,
-                side=sdk_side.value,
-                reduce_only=False
+                side=sdk_side,
+                reduce_only=order.reduce_only
             )
             
-            # 下单
-            response = await self.sdk_client.create_order(params)
+            # 下单（元数据已获取，直接调用 order 客户端，避免重复请求）
+            response = await self.sdk_client.order.create_order(params, metadata_data)
             
             if not response or response.get("code") != "SUCCESS":
-                error_msg = response.get("errorParam", {}).get("message", "未知错误")
-                raise ValueError(f"下单失败: {error_msg}")
+                error_msg = (response or {}).get("errorParam", {}).get("message", "未知错误")
+                raise ValueError(f"下单失败: {error_msg} ({response})")
             
-            logger.info(f"订单提交成功: {order.symbol} {order.side.value} {order.quantity}")
+            logger.info(
+                f"订单提交成功: {order.symbol}({contract_id}) {order.side.value} {size}"
+                f"{' reduceOnly' if order.reduce_only else ''}"
+            )
             return response
             
         except Exception as e:
             logger.error(f"下单失败: {e}")
             raise
+    
+    @staticmethod
+    def _find_contract(metadata_data: Dict[str, Any], contract_id: str) -> Dict[str, Any]:
+        for contract in metadata_data.get("contractList", []):
+            if contract.get("contractId") == contract_id:
+                return contract
+        raise ValueError(f"元数据中找不到合约 {contract_id}")
+    
+    @staticmethod
+    def _format_size(quantity: float, contract: Dict[str, Any]) -> str:
+        """
+        按合约 stepSize 向下取整下单数量，并检查交易所最小下单量
+        
+        向下取整保证不会超出策略计算的数量；未对齐 stepSize 的数量会被交易所拒绝，
+        float 运算产生的长尾小数（如 0.30000000000000004）也会在这里被截掉。
+        """
+        size = Decimal(str(quantity))
+        if size <= 0:
+            raise ValueError(f"下单数量必须大于0: {quantity}")
+        
+        step = Decimal(str(contract.get("stepSize") or "0"))
+        if step > 0:
+            size = (size / step).to_integral_value(rounding=ROUND_DOWN) * step
+        
+        min_size = Decimal(str(contract.get("minOrderSize") or "0"))
+        if size <= 0 or size < min_size:
+            raise ValueError(f"下单数量 {quantity} 按步长 {step} 取整后为 {size}，低于最小下单量 {min_size}")
+        
+        return format(size.normalize(), "f")
+    
+    @staticmethod
+    def _format_price(price: float, contract: Dict[str, Any]) -> str:
+        """按合约 tickSize 对齐价格"""
+        value = Decimal(str(price))
+        tick = Decimal(str(contract.get("tickSize") or "0"))
+        if tick > 0:
+            value = (value / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
+        return format(value.normalize(), "f")
+    
+    async def _market_order_price(self, contract_id: str, side, contract: Dict[str, Any]) -> str:
+        """
+        市价单的签名价格（与 SDK create_market_order 保持一致）
+        
+        EdgeX 市价单仍需要用价格计算 l2Value / l2LimitFee 并签名。之前固定传 "0"，
+        导致 l2Value=0、手续费上限=0，订单无法被交易所接受。
+        买单使用 oraclePrice * 10（最差可接受价格），卖单使用 tickSize。
+        """
+        tick_size = contract.get("tickSize", "0")
+        if side != SDKOrderSide.BUY:
+            return tick_size
+        
+        quote = await self.sdk_client.get_24_hour_quote(contract_id)
+        quote_list = (quote or {}).get("data") or []
+        if not quote_list:
+            raise ValueError(f"获取 {contract_id} 预言机价格失败: {quote}")
+        oracle_price = Decimal(str(quote_list[0].get("oraclePrice") or "0"))
+        if oracle_price <= 0:
+            raise ValueError(f"{contract_id} 预言机价格无效: {oracle_price}")
+        
+        precision = abs(Decimal(str(tick_size)).as_tuple().exponent)
+        return str(round(oracle_price * Decimal("10"), precision))
     
     async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
         """
