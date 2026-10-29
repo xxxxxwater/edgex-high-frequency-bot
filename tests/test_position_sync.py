@@ -82,3 +82,27 @@ async def test_failed_account_refresh_pauses_trading():
     st.client.get_account_info = AsyncMock(side_effect=RuntimeError("network down"))
     assert await st._refresh_account_if_needed() is False
     assert st._account_dirty is True
+
+
+async def test_opens_pause_when_submitted_orders_never_show_up_as_positions():
+    # 交易所接受了订单，但持仓同步始终看不到（例如持仓字段解析失败）：
+    # 不能每个冷却周期都再开一笔
+    st = make_strategy(make_config(min_trade_interval=5000))
+    st.contract_ids["SOL-USDT"] = "10000003"
+    clock = {"now": 1_000_000}
+    st._now_ms = lambda: clock["now"]
+    await st._update_account_info()
+
+    for _ in range(30):  # 30 秒，冷却 5 秒
+        set_prices(st, "SOL-USDT", _long_signal_history())
+        assert await st._refresh_account_if_needed()
+        await st._execute_strategy_for_symbol("SOL-USDT")
+        clock["now"] += 1000
+
+    assert st.client.place_order.await_count == st.max_unconfirmed_opens
+
+    # 持仓出现后计数清零；平仓后可以再次开仓
+    st.client.get_account_info.return_value = AccountInfo(
+        balance=1000, available_balance=1000, positions={"10000003": _sol_position(entry_price=99.0)})
+    await st._update_account_info()
+    assert st._unconfirmed_opens == {}

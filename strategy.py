@@ -133,6 +133,11 @@ class HighFrequencyStrategy:
         # 各交易对的最后交易时间（毫秒）
         self.last_trade_times: Dict[str, int] = {}
         
+        # 已提交成功、但尚未在交易所持仓中看到的开仓单数量。持仓解析/同步出问题时，
+        # 策略会一直以为"无持仓"并不断开仓；达到上限后暂停该交易对开仓，直到看到持仓
+        self._unconfirmed_opens: Dict[str, int] = {}
+        self.max_unconfirmed_opens = 2
+        
         # 账户/持仓快照的刷新状态：下单后持仓需要从交易所重新同步，
         # 否则本地 positions 永远是空的，同一信号会每秒重复开仓
         self.account_refresh_interval = 5000  # 账户刷新间隔（毫秒）
@@ -295,6 +300,7 @@ class HighFrequencyStrategy:
             for key, position in account_info.positions.items():
                 symbol = symbol_by_contract.get(key, key)
                 positions[symbol] = self._with_default_exits(position)
+                self._unconfirmed_opens.pop(symbol, None)
             self.positions = positions
             
             self._last_account_refresh_ms = self._now_ms()
@@ -552,6 +558,14 @@ class HighFrequencyStrategy:
             logger.debug(f"[开仓] {symbol} 处于交易冷却期或等待持仓同步，跳过")
             return
         
+        unconfirmed = self._unconfirmed_opens.get(symbol, 0)
+        if unconfirmed >= self.max_unconfirmed_opens:
+            logger.error(
+                f"[开仓] {symbol} 已提交 {unconfirmed} 笔开仓单但交易所持仓中仍看不到该交易对，"
+                f"暂停开仓以防重复建仓（请检查持仓同步/成交情况；出现持仓后自动恢复）"
+            )
+            return
+        
         try:
             # 计算仓位大小
             current_price = Decimal(str(signal.price))
@@ -618,6 +632,7 @@ class HighFrequencyStrategy:
                 result = await self.client.place_order(order)
             finally:
                 self._record_trade(symbol)
+            self._unconfirmed_opens[symbol] = unconfirmed + 1
             logger.info(f"[开仓] {symbol} 订单提交成功: {result}")
             
         except Exception as e:
