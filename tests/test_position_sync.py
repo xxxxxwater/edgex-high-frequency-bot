@@ -66,7 +66,8 @@ async def test_exchange_positions_are_keyed_by_symbol():
 
 
 async def test_existing_position_is_managed_not_reopened():
-    st = make_strategy(positions={"10000003": _sol_position()})
+    # 开仓均价 99.2：默认 0.4% 止盈止损区间约为 [98.80, 99.60]，当前价 99 在区间内
+    st = make_strategy(positions={"10000003": _sol_position(entry_price=99.2)})
     st.contract_ids["SOL-USDT"] = "10000003"
     st.price_history["SOL-USDT"] = _long_signal_history()
     await st._update_account_info()

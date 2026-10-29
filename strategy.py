@@ -289,7 +289,7 @@ class HighFrequencyStrategy:
             positions: Dict[str, Position] = {}
             for key, position in account_info.positions.items():
                 symbol = symbol_by_contract.get(key, key)
-                positions[symbol] = position
+                positions[symbol] = self._with_default_exits(position)
             self.positions = positions
             
             self._last_account_refresh_ms = self._now_ms()
@@ -305,6 +305,34 @@ class HighFrequencyStrategy:
         except Exception as e:
             logger.error(f"更新账户信息失败: {e}")
             raise
+    
+    def _with_default_exits(self, position: Position) -> Position:
+        """
+        为没有止盈止损价的持仓按开仓均价补上止盈止损
+        
+        交易所持仓接口不返回止盈止损价（edgex_client 中固定为 0），
+        若不补齐，_manage_position 里的止盈止损判断永远不会触发。
+        """
+        entry_price = Decimal(str(position.entry_price))
+        if entry_price <= 0:
+            logger.warning(f"[持仓] {position.symbol} 开仓均价无效（{position.entry_price}），无法设置止盈止损")
+            return position
+        
+        sl_pct = self.strategy_config.stop_loss_pct
+        tp_pct = self.strategy_config.take_profit_pct
+        update = {}
+        if position.direction == TradeDirection.LONG:
+            if position.stop_loss <= 0:
+                update["stop_loss"] = float(entry_price * (Decimal("1") - sl_pct))
+            if position.take_profit <= 0:
+                update["take_profit"] = float(entry_price * (Decimal("1") + tp_pct))
+        elif position.direction == TradeDirection.SHORT:
+            if position.stop_loss <= 0:
+                update["stop_loss"] = float(entry_price * (Decimal("1") + sl_pct))
+            if position.take_profit <= 0:
+                update["take_profit"] = float(entry_price * (Decimal("1") - tp_pct))
+        
+        return position.model_copy(update=update) if update else position
     
     async def _refresh_account_if_needed(self) -> bool:
         """
