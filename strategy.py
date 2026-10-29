@@ -125,6 +125,10 @@ class HighFrequencyStrategy:
         self.trade_records: List[TradeRecord] = []
         self.equity_history: List[Decimal] = []
         self.price_history: Dict[str, List[PriceData]] = {}  # 价格历史记录
+        # 各交易对最近一次收到 WebSocket 价格推送的本地时间（毫秒）。超过 max_ws_price_age_ms
+        # 没有推送（断线/未连接/未订阅成功）时每轮都改用 REST ticker，避免用冻结的价格做止损判断
+        self._last_ws_price_ms: Dict[str, int] = {}
+        self.max_ws_price_age_ms = 5000
         
         # 各交易对的最后交易时间（毫秒）
         self.last_trade_times: Dict[str, int] = {}
@@ -265,6 +269,7 @@ class HighFrequencyStrategy:
             # 保持历史记录在合理范围内
             if len(self.price_history[symbol]) > 1000:
                 self.price_history[symbol] = self.price_history[symbol][-1000:]
+            self._last_ws_price_ms[symbol] = self._now_ms()
             
             logger.debug(f"{symbol}: 价格更新 {price_data.close}")
             
@@ -355,6 +360,11 @@ class HighFrequencyStrategy:
     def _now_ms(self) -> int:
         return int(time.time() * 1000)
     
+    def _ws_price_is_fresh(self, symbol: str) -> bool:
+        """最近 max_ws_price_age_ms 内是否收到过该交易对的 WebSocket 价格推送"""
+        last = self._last_ws_price_ms.get(symbol)
+        return last is not None and self._now_ms() - last <= self.max_ws_price_age_ms
+    
     def _can_trade(self, symbol: str) -> bool:
         """
         该交易对是否允许下新单
@@ -382,9 +392,11 @@ class HighFrequencyStrategy:
             # 首先尝试从WebSocket获取价格历史数据
             klines = self.price_history.get(symbol, [])
             
-            # 如果WebSocket数据不足，尝试从REST API获取Ticker数据构建简单K线
-            if len(klines) < self.strategy_config.medium_ma_period:
-                logger.debug(f"{symbol}: WebSocket数据不足 (收到{len(klines)}/{self.strategy_config.medium_ma_period})，尝试使用Ticker数据")
+            # 如果WebSocket数据不足或没有新的推送，从REST API获取Ticker数据构建简单K线。
+            # 之前只在数据不足 medium_ma_period 条时才拉 REST：凑满 5 条后若 WebSocket 没有推送
+            # （断线、未连接），价格会永久冻结在第 5 条，止盈止损和信号都基于过期价格
+            if len(klines) < self.strategy_config.medium_ma_period or not self._ws_price_is_fresh(symbol):
+                logger.debug(f"{symbol}: WebSocket数据不足或已过期 (收到{len(klines)}/{self.strategy_config.medium_ma_period})，尝试使用Ticker数据")
                 
                 # 获取合约ID
                 contract_id = self.contract_ids.get(symbol)

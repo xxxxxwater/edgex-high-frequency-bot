@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock
 
 from edgex_types import AccountInfo, Position, TradeDirection
-from tests.helpers import make_config, make_strategy, price
+from tests.helpers import make_config, make_strategy, price, set_prices
 
 
 def _long_signal_history():
@@ -21,13 +21,13 @@ def _sol_position(**kw):
 async def test_persistent_signal_does_not_reopen_every_loop():
     st = make_strategy()
     st.contract_ids["SOL-USDT"] = "10000003"
-    st.price_history["SOL-USDT"] = _long_signal_history()
     clock = {"now": 1_000_000}
     st._now_ms = lambda: clock["now"]
     await st._update_account_info()
 
     # 模拟 run() 主循环 5 次（每次间隔 1 秒），交易所持仓尚未反映成交
     for _ in range(5):
+        set_prices(st, "SOL-USDT", _long_signal_history())
         assert await st._refresh_account_if_needed()
         await st._execute_strategy_for_symbol("SOL-USDT")
         clock["now"] += 1000
@@ -69,7 +69,7 @@ async def test_existing_position_is_managed_not_reopened():
     # 开仓均价 99.2：默认 0.4% 止盈止损区间约为 [98.80, 99.60]，当前价 99 在区间内
     st = make_strategy(positions={"10000003": _sol_position(entry_price=99.2)})
     st.contract_ids["SOL-USDT"] = "10000003"
-    st.price_history["SOL-USDT"] = _long_signal_history()
+    set_prices(st, "SOL-USDT", _long_signal_history())
     await st._update_account_info()
 
     await st._execute_strategy_for_symbol("SOL-USDT")

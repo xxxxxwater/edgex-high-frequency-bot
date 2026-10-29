@@ -3,7 +3,7 @@
 import pytest
 
 from edgex_types import OrderSide, Position, TradeDirection
-from tests.helpers import make_config, make_strategy, price
+from tests.helpers import make_config, make_strategy, price, set_prices
 
 
 def _position(direction, entry=100.0):
@@ -27,7 +27,7 @@ async def test_exits_trigger_on_exchange_positions(direction, last_price, close_
     st.contract_ids["SOL-USDT"] = "10000003"
     await st._update_account_info()
     # 价格平稳后突变，均线偏离不会单独触发反向信号的情况也要能止损
-    st.price_history["SOL-USDT"] = [price(last_price)] * 5
+    set_prices(st, "SOL-USDT", [price(last_price)] * 5)
 
     await st._execute_strategy_for_symbol("SOL-USDT")
 
@@ -43,7 +43,7 @@ async def test_no_exit_inside_band():
     st = make_strategy(cfg, positions={"10000003": _position(TradeDirection.LONG)})
     st.contract_ids["SOL-USDT"] = "10000003"
     await st._update_account_info()
-    st.price_history["SOL-USDT"] = [price(100.5)] * 5
+    set_prices(st, "SOL-USDT", [price(100.5)] * 5)
 
     await st._execute_strategy_for_symbol("SOL-USDT")
     st.client.place_order.assert_not_awaited()

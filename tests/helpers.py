@@ -24,6 +24,12 @@ def price(p: float) -> PriceData:
     return PriceData(timestamp=int(time.time() * 1000), open=p, high=p, low=p, close=p, volume=0)
 
 
+def set_prices(st, symbol: str, prices):
+    """模拟刚收到 WebSocket 推送的价格历史（否则会被视为过期而改走 REST ticker）"""
+    st.price_history[symbol] = list(prices)
+    st._last_ws_price_ms[symbol] = st._now_ms()
+
+
 def make_strategy(config: Config = None, balance: str = "1000", positions=None):
     config = config or make_config()
     with patch.object(strategy_module, "EdgeXClient"):
