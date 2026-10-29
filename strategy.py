@@ -59,7 +59,7 @@ class StrategyConfig:
         "10000004": Decimal("0.01"),    # BNB
     }
     
-    def __init__(self):
+    def __init__(self, config=None):
         # 仓位配置
         self.base_position_size = Decimal("0.05")  # 5%仓位（每个币种）
         self.leverage = 50  # 杠杆倍数
@@ -67,6 +67,13 @@ class StrategyConfig:
         # 止盈止损
         self.take_profit_pct = Decimal("0.004")  # 0.4%止盈
         self.stop_loss_pct = Decimal("0.004")    # 0.4%止损
+        
+        # 使用 .env / Config 中的参数覆盖默认值（之前这些配置只被打印、从未生效）
+        if config is not None:
+            self.base_position_size = Decimal(str(config.base_position_size))
+            self.leverage = int(config.leverage)
+            self.take_profit_pct = Decimal(str(config.take_profit_pct))
+            self.stop_loss_pct = Decimal(str(config.stop_loss_pct))
         
         # 均线参数（优化：减少等待时间）
         self.short_ma_period = 1
@@ -106,7 +113,7 @@ class HighFrequencyStrategy:
             config: 配置对象，包含API密钥、交易对列表等信息
         """
         self.config = config
-        self.strategy_config = StrategyConfig()
+        self.strategy_config = StrategyConfig(config)
         self.client = EdgeXClient(config)
         
         # 账户状态
@@ -128,8 +135,8 @@ class HighFrequencyStrategy:
         
         # 运行状态
         self.is_running = False
-        self.min_trade_interval = 5000  # 最小交易间隔（毫秒）
-        self.max_trade_interval = 60000  # 最大交易间隔（毫秒）
+        self.min_trade_interval = int(getattr(config, "min_trade_interval", 5000))  # 最小交易间隔（毫秒）
+        self.max_trade_interval = int(getattr(config, "max_trade_interval", 60000))  # 最大交易间隔（毫秒）
         
         logger.info("="*60)
         logger.info("多币种高频策略初始化（v3.4 - WebSocket版）")
