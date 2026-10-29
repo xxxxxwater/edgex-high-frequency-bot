@@ -66,3 +66,19 @@ async def test_stop_loss_uses_rest_price_after_websocket_goes_silent():
     st.client.place_order.assert_awaited_once()
     assert st.client.place_order.await_args.args[0].side == OrderSide.SELL
 
+
+async def test_failed_or_timed_out_open_order_still_enters_cooldown():
+    # 超时的订单可能已被交易所接受；立即重试会重复开仓
+    st = make_strategy()
+    st.contract_ids["SOL-USDT"] = "10000003"
+    clock = _with_clock(st)
+    await st._update_account_info()
+    st.client.place_order = AsyncMock(side_effect=TimeoutError("request timed out"))
+
+    for _ in range(3):
+        set_prices(st, "SOL-USDT", [price(100)] * 4 + [price(99)])  # 持续做多信号
+        assert await st._refresh_account_if_needed()
+        await st._execute_strategy_for_symbol("SOL-USDT")
+        clock["now"] += 1000
+
+    assert st.client.place_order.await_count == 1

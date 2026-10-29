@@ -35,6 +35,7 @@ async def test_exits_trigger_on_exchange_positions(direction, last_price, close_
     order = st.client.place_order.await_args.args[0]
     assert order.side == close_side
     assert order.quantity == 2.0
+    assert order.reduce_only is True  # 平仓单只减仓，持仓已不存在时不会反向开仓
     assert "SOL-USDT" not in st.positions
 
 

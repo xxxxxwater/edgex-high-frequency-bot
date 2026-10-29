@@ -612,12 +612,13 @@ class HighFrequencyStrategy:
                 leverage=self.strategy_config.leverage
             )
             
-            # 下单
-            result = await self.client.place_order(order)
+            # 下单。无论成功与否都进入冷却并等待持仓同步：超时/网络错误时订单可能已被
+            # 交易所接受，立即重试会重复开仓；被拒绝时也避免每秒重复提交
+            try:
+                result = await self.client.place_order(order)
+            finally:
+                self._record_trade(symbol)
             logger.info(f"[开仓] {symbol} 订单提交成功: {result}")
-            
-            # 记录交易时间（按交易对），等待持仓同步后才允许再次下单
-            self._record_trade(symbol)
             
         except Exception as e:
             logger.error(f"[开仓] {symbol} 失败: {e}")
@@ -678,19 +679,23 @@ class HighFrequencyStrategy:
             return
         
         try:
-            # 创建平仓订单（反向操作）
+            # 创建平仓订单（反向操作）。只减仓：本地持仓过期（已被平掉/已强平）时，
+            # 交易所会拒绝而不是反向开出一笔新仓位
             order = Order(
                 symbol=symbol,
                 side=OrderSide.SELL if position.direction == TradeDirection.LONG else OrderSide.BUY,
                 order_type=OrderType.MARKET,
                 quantity=position.size,
-                leverage=position.leverage
+                leverage=position.leverage,
+                reduce_only=True
             )
             
-            # 下单
-            result = await self.client.place_order(order)
+            # 下单（失败也进入冷却，原因同开仓；持仓刷新后若仍存在会再次尝试平仓）
+            try:
+                result = await self.client.place_order(order)
+            finally:
+                self._record_trade(symbol)
             logger.info(f"[平仓] {symbol} 订单提交成功: {result}")
-            self._record_trade(symbol)
             
             # 记录交易
             trade_record = TradeRecord(
