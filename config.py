@@ -4,7 +4,7 @@
 
 import os
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -53,6 +53,28 @@ class Config(BaseModel):
     
     class Config:
         env_prefix = "EDGEX_"
+    
+    @field_validator("stark_private_key")
+    @classmethod
+    def _normalize_stark_private_key(cls, value: Optional[str]) -> Optional[str]:
+        """
+        SDK 签名时用 binascii.unhexlify(private_key) 校验私钥：带 "0x" 前缀（文档示例的写法）
+        或奇数位的十六进制都会报 Invalid private key hex string，导致所有订单签名失败。
+        """
+        if value is None:
+            return None
+        value = value.strip()
+        if value[:2].lower() == "0x":
+            value = value[2:]
+        if len(value) % 2:
+            value = "0" + value
+        return value or None
+    
+    @field_validator("symbols")
+    @classmethod
+    def _normalize_symbols(cls, value: List[str]) -> List[str]:
+        """去掉 EDGEX_SYMBOLS 中的空格和空项（"BTC-USDT, ETH-USDT" 之前会得到 " ETH-USDT"）"""
+        return [symbol.strip() for symbol in value if symbol and symbol.strip()]
 
 
 def load_config() -> Config:

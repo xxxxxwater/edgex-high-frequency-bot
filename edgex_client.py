@@ -6,6 +6,7 @@ EdgeX API客户端
 import asyncio
 import sys
 import os
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from typing import List, Optional, Dict, Any
 from loguru import logger
 
@@ -76,56 +77,28 @@ class EdgeXClient:
             raise
     
     async def get_account_info(self) -> AccountInfo:
-        """获取账户信息"""
+        """
+        获取账户信息
+        
+        字段结构以官方 SDK 为准（edgex-golang-sdk sdk/account/types.go 的 AccountAssetData）：
+        - 余额在 data.collateralAssetModelList[].totalEquity / availableBalance；
+        - 持仓在 data.positionList[]，openSize 为带符号的持仓数量（正=多，负=空），
+          openValue 为开仓价值，没有 positionSide / positionSize / avgEntryPrice 字段。
+        之前按 data.totalEquity、positionSize 解析：余额恒为 0、持仓恒为空。
+        
+        响应缺少关键字段时直接抛出异常（策略会暂停本轮交易），
+        而不是当作"余额 0 / 无持仓"处理——后者会让策略在已有持仓时继续开仓。
+        """
         try:
-            # 获取账户资产
+            # getAccountAsset 同时返回余额和持仓（SDK 的 get_account_positions 调用的是同一个接口）
             asset_response = await self.sdk_client.account.get_account_asset()
             
             if not asset_response or asset_response.get("code") != "SUCCESS":
                 raise ValueError(f"获取账户资产失败: {asset_response}")
             
-            asset_data = asset_response.get("data", {})
-            
-            # 解析余额
-            balance = float(asset_data.get("totalEquity", 0))
-            available_balance = float(asset_data.get("availableBalance", 0))
-            
-            # 获取持仓信息
-            positions = {}
-            positions_response = await self.sdk_client.account.get_account_positions()
-            
-            if positions_response and positions_response.get("code") == "SUCCESS":
-                position_list = positions_response.get("data", {}).get("positionList", [])
-                
-                for pos_data in position_list:
-                    contract_id = pos_data.get("contractId", "")
-                    if not contract_id:
-                        continue
-                    
-                    # 解析方向
-                    position_side = pos_data.get("positionSide", "LONG")
-                    if position_side == "LONG":
-                        direction = TradeDirection.LONG
-                    elif position_side == "SHORT":
-                        direction = TradeDirection.SHORT
-                    else:
-                        continue
-                    
-                    # 解析持仓大小（可能是负数表示方向）
-                    size = abs(float(pos_data.get("positionSize", 0)))
-                    
-                    if size > 0:  # 只记录有持仓的
-                        position = Position(
-                            symbol=contract_id,
-                            direction=direction,
-                            size=size,
-                            entry_price=float(pos_data.get("avgEntryPrice", 0)),
-                            stop_loss=0.0,  # SDK不直接提供，需要从订单中获取
-                            take_profit=0.0,  # SDK不直接提供，需要从订单中获取
-                            leverage=int(pos_data.get("leverage", 1)),
-                            opening_time=int(pos_data.get("createdTime", 0))
-                        )
-                        positions[contract_id] = position
+            asset_data = asset_response.get("data") or {}
+            balance, available_balance = self._parse_balances(asset_data)
+            positions = self._parse_positions(asset_data)
             
             return AccountInfo(
                 balance=balance,
@@ -136,6 +109,54 @@ class EdgeXClient:
         except Exception as e:
             logger.error(f"获取账户信息失败: {e}")
             raise
+    
+    @staticmethod
+    def _parse_balances(asset_data: Dict[str, Any]):
+        collateral_list = asset_data.get("collateralAssetModelList")
+        if collateral_list:
+            collateral = collateral_list[0]
+        elif "totalEquity" in asset_data:
+            collateral = asset_data
+        else:
+            raise ValueError("账户资产响应缺少 collateralAssetModelList，无法确定余额")
+        
+        equity = collateral.get("totalEquity")
+        available = collateral.get("availableBalance", collateral.get("availableAmount"))
+        if equity is None or available is None:
+            raise ValueError(f"账户资产响应缺少 totalEquity/availableBalance: {collateral}")
+        return float(equity), float(available)
+    
+    def _parse_positions(self, asset_data: Dict[str, Any]) -> Dict[str, Position]:
+        positions = {}
+        for pos_data in asset_data.get("positionList") or []:
+            contract_id = str(pos_data.get("contractId") or "")
+            if not contract_id:
+                continue
+            
+            raw_size = pos_data.get("openSize", pos_data.get("size"))
+            if raw_size is None:
+                raise ValueError(f"持仓数据缺少 openSize，无法确认持仓: {pos_data}")
+            size = Decimal(str(raw_size))
+            if size == 0:
+                continue
+            
+            direction = TradeDirection.LONG if size > 0 else TradeDirection.SHORT
+            open_value = abs(Decimal(str(pos_data.get("openValue") or "0")))
+            entry_price = open_value / abs(size)
+            
+            created_ms = int(pos_data.get("createdTime") or 0)
+            positions[contract_id] = Position(
+                symbol=contract_id,
+                direction=direction,
+                size=float(abs(size)),
+                entry_price=float(entry_price),
+                stop_loss=0.0,  # 接口不提供，由策略按开仓均价计算
+                take_profit=0.0,
+                # 持仓接口不返回杠杆，使用配置值
+                leverage=int(pos_data.get("leverage") or getattr(self.config, "leverage", 1)),
+                opening_time=created_ms // 1000  # 毫秒 -> 秒（TradeRecord.duration 按秒计算）
+            )
+        return positions
     
     async def get_klines(self, symbol: str, interval: str, limit: int) -> List[PriceData]:
         """
@@ -209,47 +230,125 @@ class EdgeXClient:
         下单
         
         Args:
-            order: 订单对象
+            order: 订单对象（symbol 可以是交易对名称或合约ID）
             
         Returns:
             Dict[str, Any]: 下单响应
         """
         try:
-            # 转换OrderSide
-            if order.side == OrderSide.BUY:
-                sdk_side = SDKOrderSide.BUY
-            else:
-                sdk_side = SDKOrderSide.SELL
+            # 策略传入的是交易对名称（如 "SOL-USDT"），SDK 需要合约ID
+            contract_id = await self.get_contract_id_by_symbol(order.symbol)
+            if not contract_id:
+                raise ValueError(f"无法找到交易对 {order.symbol} 的合约ID")
+            
+            metadata = await self.sdk_client.get_metadata()
+            if not metadata or metadata.get("code") != "SUCCESS":
+                raise ValueError(f"获取元数据失败: {metadata}")
+            metadata_data = metadata.get("data", {})
+            contract = self._find_contract(metadata_data, contract_id)
+            
+            # 转换OrderSide（SDK 内部使用 params.side.value，必须传枚举而不是字符串）
+            sdk_side = SDKOrderSide.BUY if order.side == OrderSide.BUY else SDKOrderSide.SELL
             
             # 转换OrderType
             if order.order_type == OrderType.MARKET:
                 sdk_type = SDKOrderType.MARKET
+                price = await self._market_order_price(contract_id, sdk_side, contract)
             else:
                 sdk_type = SDKOrderType.LIMIT
+                if not order.price or order.price <= 0:
+                    raise ValueError("限价单必须指定价格")
+                price = self._format_price(order.price, contract)
+            
+            size = self._format_size(order.quantity, contract)
             
             # 创建订单参数
             params = CreateOrderParams(
-                contract_id=order.symbol,
-                price=str(order.price) if order.price else "0",
-                size=str(order.quantity),
+                contract_id=contract_id,
+                price=price,
+                size=size,
                 type=sdk_type,
-                side=sdk_side.value,
-                reduce_only=False
+                side=sdk_side,
+                reduce_only=order.reduce_only
             )
             
-            # 下单
-            response = await self.sdk_client.create_order(params)
+            # 下单（元数据已获取，直接调用 order 客户端，避免重复请求）
+            response = await self.sdk_client.order.create_order(params, metadata_data)
             
             if not response or response.get("code") != "SUCCESS":
-                error_msg = response.get("errorParam", {}).get("message", "未知错误")
-                raise ValueError(f"下单失败: {error_msg}")
+                error_msg = (response or {}).get("errorParam", {}).get("message", "未知错误")
+                raise ValueError(f"下单失败: {error_msg} ({response})")
             
-            logger.info(f"订单提交成功: {order.symbol} {order.side.value} {order.quantity}")
+            logger.info(
+                f"订单提交成功: {order.symbol}({contract_id}) {order.side.value} {size}"
+                f"{' reduceOnly' if order.reduce_only else ''}"
+            )
             return response
             
         except Exception as e:
             logger.error(f"下单失败: {e}")
             raise
+    
+    @staticmethod
+    def _find_contract(metadata_data: Dict[str, Any], contract_id: str) -> Dict[str, Any]:
+        for contract in metadata_data.get("contractList", []):
+            if contract.get("contractId") == contract_id:
+                return contract
+        raise ValueError(f"元数据中找不到合约 {contract_id}")
+    
+    @staticmethod
+    def _format_size(quantity: float, contract: Dict[str, Any]) -> str:
+        """
+        按合约 stepSize 向下取整下单数量，并检查交易所最小下单量
+        
+        向下取整保证不会超出策略计算的数量；未对齐 stepSize 的数量会被交易所拒绝，
+        float 运算产生的长尾小数（如 0.30000000000000004）也会在这里被截掉。
+        """
+        size = Decimal(str(quantity))
+        if size <= 0:
+            raise ValueError(f"下单数量必须大于0: {quantity}")
+        
+        step = Decimal(str(contract.get("stepSize") or "0"))
+        if step > 0:
+            size = (size / step).to_integral_value(rounding=ROUND_DOWN) * step
+        
+        min_size = Decimal(str(contract.get("minOrderSize") or "0"))
+        if size <= 0 or size < min_size:
+            raise ValueError(f"下单数量 {quantity} 按步长 {step} 取整后为 {size}，低于最小下单量 {min_size}")
+        
+        return format(size.normalize(), "f")
+    
+    @staticmethod
+    def _format_price(price: float, contract: Dict[str, Any]) -> str:
+        """按合约 tickSize 对齐价格"""
+        value = Decimal(str(price))
+        tick = Decimal(str(contract.get("tickSize") or "0"))
+        if tick > 0:
+            value = (value / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
+        return format(value.normalize(), "f")
+    
+    async def _market_order_price(self, contract_id: str, side, contract: Dict[str, Any]) -> str:
+        """
+        市价单的签名价格（与 SDK create_market_order 保持一致）
+        
+        EdgeX 市价单仍需要用价格计算 l2Value / l2LimitFee 并签名。之前固定传 "0"，
+        导致 l2Value=0、手续费上限=0，订单无法被交易所接受。
+        买单使用 oraclePrice * 10（最差可接受价格），卖单使用 tickSize。
+        """
+        tick_size = contract.get("tickSize", "0")
+        if side != SDKOrderSide.BUY:
+            return tick_size
+        
+        quote = await self.sdk_client.get_24_hour_quote(contract_id)
+        quote_list = (quote or {}).get("data") or []
+        if not quote_list:
+            raise ValueError(f"获取 {contract_id} 预言机价格失败: {quote}")
+        oracle_price = Decimal(str(quote_list[0].get("oraclePrice") or "0"))
+        if oracle_price <= 0:
+            raise ValueError(f"{contract_id} 预言机价格无效: {oracle_price}")
+        
+        precision = abs(Decimal(str(tick_size)).as_tuple().exponent)
+        return str(round(oracle_price * Decimal("10"), precision))
     
     async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
         """

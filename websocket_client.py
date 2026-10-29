@@ -30,6 +30,7 @@ class RealTimePriceStream:
         """
         self.symbols = symbols
         self.contract_ids = contract_ids
+        self._disconnect_hook_registered = False
         self.running = False
         self.price_callbacks: List[Callable[[str, PriceData], None]] = []
         self.price_history: Dict[str, List[PriceData]] = {}
@@ -55,6 +56,14 @@ class RealTimePriceStream:
         max_retries = 3
         retry_delay = 3  # 3秒重试间隔
         
+        # SDK 客户端断线后不会自动重连；这里至少记录错误，
+        # 策略侧在价格超过 5 秒未更新时会自动改用 REST ticker
+        if not self._disconnect_hook_registered:
+            self.ws_manager.get_public_client().on_disconnect(
+                lambda e: logger.error(f"❌ WebSocket连接已断开，将改用REST获取价格: {e}")
+            )
+            self._disconnect_hook_registered = True
+        
         for attempt in range(max_retries):
             try:
                 # 连接公共WebSocket
@@ -73,10 +82,11 @@ class RealTimePriceStream:
                     contract_id = self.contract_ids.get(symbol)
                     if contract_id:
                         try:
-                            # 订阅ticker数据
+                            # 订阅ticker数据。SDK 按消息类型 "ticker" 只保存一个 handler，
+                            # 每次订阅都会覆盖上一个，所以统一用按 channel 分发的 handler
                             self.ws_manager.subscribe_ticker(
                                 contract_id=contract_id,
-                                handler=lambda msg, sym=symbol: self._handle_ticker_message(sym, msg)
+                                handler=self._dispatch_ticker_message
                             )
                             logger.info(f"✅ 已订阅 {symbol} ({contract_id}) 的ticker数据")
                             subscribed_count += 1
@@ -115,35 +125,78 @@ class RealTimePriceStream:
             self.ws_manager.disconnect_all()
         logger.info("WebSocket连接已关闭")
     
-    def _handle_ticker_message(self, symbol: str, message: str):
-        """处理ticker消息"""
+    def _dispatch_ticker_message(self, message: str):
+        """
+        按消息 channel（"ticker.<合约ID>"）或数据中的 contractId 把 ticker 分发到对应交易对
+        
+        之前每个交易对注册一个 lambda handler，但 SDK 的 on_message("ticker", handler)
+        是按消息类型覆盖保存的，最终只剩最后一个交易对的 handler：
+        所有币种的 ticker 都被记到最后一个交易对的价格历史里（例如 BTC 的价格被当成 BNB），
+        直接导致错误的均线偏离信号和止盈止损判断。
+        """
         try:
             data = json.loads(message)
-            
-            # 解析ticker数据
-            if "data" in data:
-                ticker_data = data["data"]
-                price = self._parse_ticker_data(ticker_data)
-                
-                if price:
-                    # 添加到历史记录
-                    self.price_history[symbol].append(price)
-                    
-                    # 保持历史记录在合理范围内
-                    if len(self.price_history[symbol]) > 1000:
-                        self.price_history[symbol] = self.price_history[symbol][-1000:]
-                    
-                    # 调用回调函数
-                    for callback in self.price_callbacks:
-                        try:
-                            callback(symbol, price)
-                        except Exception as e:
-                            logger.error(f"价格回调函数执行失败: {e}")
-                    
-                    logger.debug(f"{symbol}: 价格更新 {price.close}")
-        
         except Exception as e:
             logger.error(f"处理ticker消息失败: {e}")
+            return
+        
+        channel = data.get("channel") or (data.get("content") or {}).get("channel") or ""
+        channel_contract = channel.split(".", 1)[1] if "." in channel else None
+        symbol_by_contract = {str(cid): sym for sym, cid in self.contract_ids.items()}
+        
+        for item in self._extract_ticker_items(data):
+            contract_id = str(item.get("contractId") or channel_contract or "")
+            symbol = symbol_by_contract.get(contract_id)
+            if symbol is None:
+                logger.debug(f"忽略未订阅合约的ticker: {contract_id}")
+                continue
+            self._on_ticker(symbol, item)
+    
+    def _handle_ticker_message(self, symbol: str, message: str):
+        """处理指定交易对的ticker消息"""
+        try:
+            data = json.loads(message)
+            for item in self._extract_ticker_items(data):
+                self._on_ticker(symbol, item)
+        except Exception as e:
+            logger.error(f"处理ticker消息失败: {e}")
+    
+    @staticmethod
+    def _extract_ticker_items(data: dict) -> List[dict]:
+        """
+        取出消息中的 ticker 数据，兼容 {"data": {...}} 与
+        {"content": {"data": [...]}} 两种结构（data 可能是对象或列表）
+        """
+        payload = data.get("data")
+        if payload is None and isinstance(data.get("content"), dict):
+            payload = data["content"].get("data")
+        if isinstance(payload, dict):
+            return [payload]
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
+    
+    def _on_ticker(self, symbol: str, ticker_data: dict):
+        price = self._parse_ticker_data(ticker_data)
+        if not price:
+            return
+        
+        # 添加到历史记录
+        history = self.price_history.setdefault(symbol, [])
+        history.append(price)
+        
+        # 保持历史记录在合理范围内
+        if len(history) > 1000:
+            self.price_history[symbol] = history[-1000:]
+        
+        # 调用回调函数
+        for callback in self.price_callbacks:
+            try:
+                callback(symbol, price)
+            except Exception as e:
+                logger.error(f"价格回调函数执行失败: {e}")
+        
+        logger.debug(f"{symbol}: 价格更新 {price.close}")
     
     def _parse_ticker_data(self, data: dict) -> Optional[PriceData]:
         """解析ticker数据为PriceData格式"""

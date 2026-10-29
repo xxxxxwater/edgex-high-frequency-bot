@@ -59,7 +59,7 @@ class StrategyConfig:
         "10000004": Decimal("0.01"),    # BNB
     }
     
-    def __init__(self):
+    def __init__(self, config=None):
         # 仓位配置
         self.base_position_size = Decimal("0.05")  # 5%仓位（每个币种）
         self.leverage = 50  # 杠杆倍数
@@ -67,6 +67,13 @@ class StrategyConfig:
         # 止盈止损
         self.take_profit_pct = Decimal("0.004")  # 0.4%止盈
         self.stop_loss_pct = Decimal("0.004")    # 0.4%止损
+        
+        # 使用 .env / Config 中的参数覆盖默认值（之前这些配置只被打印、从未生效）
+        if config is not None:
+            self.base_position_size = Decimal(str(config.base_position_size))
+            self.leverage = int(config.leverage)
+            self.take_profit_pct = Decimal(str(config.take_profit_pct))
+            self.stop_loss_pct = Decimal(str(config.stop_loss_pct))
         
         # 均线参数（优化：减少等待时间）
         self.short_ma_period = 1
@@ -106,7 +113,7 @@ class HighFrequencyStrategy:
             config: 配置对象，包含API密钥、交易对列表等信息
         """
         self.config = config
-        self.strategy_config = StrategyConfig()
+        self.strategy_config = StrategyConfig(config)
         self.client = EdgeXClient(config)
         
         # 账户状态
@@ -118,9 +125,24 @@ class HighFrequencyStrategy:
         self.trade_records: List[TradeRecord] = []
         self.equity_history: List[Decimal] = []
         self.price_history: Dict[str, List[PriceData]] = {}  # 价格历史记录
+        # 各交易对最近一次收到 WebSocket 价格推送的本地时间（毫秒）。超过 max_ws_price_age_ms
+        # 没有推送（断线/未连接/未订阅成功）时每轮都改用 REST ticker，避免用冻结的价格做止损判断
+        self._last_ws_price_ms: Dict[str, int] = {}
+        self.max_ws_price_age_ms = 5000
         
-        # 各交易对的最后交易时间
+        # 各交易对的最后交易时间（毫秒）
         self.last_trade_times: Dict[str, int] = {}
+        
+        # 已提交成功、但尚未在交易所持仓中看到的开仓单数量。持仓解析/同步出问题时，
+        # 策略会一直以为"无持仓"并不断开仓；达到上限后暂停该交易对开仓，直到看到持仓
+        self._unconfirmed_opens: Dict[str, int] = {}
+        self.max_unconfirmed_opens = 2
+        
+        # 账户/持仓快照的刷新状态：下单后持仓需要从交易所重新同步，
+        # 否则本地 positions 永远是空的，同一信号会每秒重复开仓
+        self.account_refresh_interval = 5000  # 账户刷新间隔（毫秒）
+        self._last_account_refresh_ms = 0
+        self._account_dirty = True
         
         # WebSocket价格流
         self.price_stream: Optional[RealTimePriceStream] = None
@@ -128,8 +150,8 @@ class HighFrequencyStrategy:
         
         # 运行状态
         self.is_running = False
-        self.min_trade_interval = 5000  # 最小交易间隔（毫秒）
-        self.max_trade_interval = 60000  # 最大交易间隔（毫秒）
+        self.min_trade_interval = int(getattr(config, "min_trade_interval", 5000))  # 最小交易间隔（毫秒）
+        self.max_trade_interval = int(getattr(config, "max_trade_interval", 60000))  # 最大交易间隔（毫秒）
         
         logger.info("="*60)
         logger.info("多币种高频策略初始化（v3.4 - WebSocket版）")
@@ -150,6 +172,9 @@ class HighFrequencyStrategy:
         logger.info("策略开始运行...")
         
         try:
+            # 先解析合约ID，交易所持仓按合约ID返回，需要映射回交易对名称
+            await self._resolve_contract_ids()
+            
             # 更新账户信息
             await self._update_account_info()
             
@@ -167,6 +192,12 @@ class HighFrequencyStrategy:
             
             while self.is_running:
                 try:
+                    # 定期（以及每次下单后）从交易所同步余额和持仓；
+                    # 同步失败时本轮不交易，避免基于过期持仓重复开仓
+                    if not await self._refresh_account_if_needed():
+                        await asyncio.sleep(5)
+                        continue
+                    
                     # 对每个交易对执行策略
                     for symbol in self.config.symbols:
                         await self._execute_strategy_for_symbol(symbol)
@@ -189,17 +220,23 @@ class HighFrequencyStrategy:
                     pass
             logger.info("策略已停止")
     
+    async def _resolve_contract_ids(self):
+        """解析交易对 -> 合约ID 映射（已解析的跳过）"""
+        for symbol in self.config.symbols:
+            if symbol in self.contract_ids:
+                continue
+            contract_id = await self.client.get_contract_id_by_symbol(symbol)
+            if contract_id:
+                self.contract_ids[symbol] = contract_id
+                logger.info(f"映射 {symbol} -> {contract_id}")
+            else:
+                logger.error(f"无法获取 {symbol} 的合约ID")
+    
     async def _initialize_websocket(self):
         """初始化WebSocket连接"""
         try:
             # 获取合约ID映射
-            for symbol in self.config.symbols:
-                contract_id = await self.client.get_contract_id_by_symbol(symbol)
-                if contract_id:
-                    self.contract_ids[symbol] = contract_id
-                    logger.info(f"映射 {symbol} -> {contract_id}")
-                else:
-                    logger.error(f"无法获取 {symbol} 的合约ID")
+            await self._resolve_contract_ids()
             
             # 确定base_url (WebSocket使用wss://，SDK会自动添加/api/v1/public/ws路径)
             if self.config.testnet:
@@ -237,6 +274,7 @@ class HighFrequencyStrategy:
             # 保持历史记录在合理范围内
             if len(self.price_history[symbol]) > 1000:
                 self.price_history[symbol] = self.price_history[symbol][-1000:]
+            self._last_ws_price_ms[symbol] = self._now_ms()
             
             logger.debug(f"{symbol}: 价格更新 {price_data.close}")
             
@@ -254,7 +292,19 @@ class HighFrequencyStrategy:
             account_info = await self.client.get_account_info()
             self.balance = Decimal(str(account_info.balance))
             self.available_balance = Decimal(str(account_info.available_balance))
-            self.positions = account_info.positions
+            
+            # 交易所按合约ID（如 "10000003"）返回持仓，策略按交易对名称（如 "SOL-USDT"）查找，
+            # 这里统一转换为交易对名称作为键
+            symbol_by_contract = {cid: sym for sym, cid in self.contract_ids.items()}
+            positions: Dict[str, Position] = {}
+            for key, position in account_info.positions.items():
+                symbol = symbol_by_contract.get(key, key)
+                positions[symbol] = self._with_default_exits(position)
+                self._unconfirmed_opens.pop(symbol, None)
+            self.positions = positions
+            
+            self._last_account_refresh_ms = self._now_ms()
+            self._account_dirty = False
             
             # 记录权益历史
             self.equity_history.append(self.balance)
@@ -267,15 +317,92 @@ class HighFrequencyStrategy:
             logger.error(f"更新账户信息失败: {e}")
             raise
     
+    def _with_default_exits(self, position: Position) -> Position:
+        """
+        为没有止盈止损价的持仓按开仓均价补上止盈止损
+        
+        交易所持仓接口不返回止盈止损价（edgex_client 中固定为 0），
+        若不补齐，_manage_position 里的止盈止损判断永远不会触发。
+        """
+        entry_price = Decimal(str(position.entry_price))
+        if entry_price <= 0:
+            logger.warning(f"[持仓] {position.symbol} 开仓均价无效（{position.entry_price}），无法设置止盈止损")
+            return position
+        
+        sl_pct = self.strategy_config.stop_loss_pct
+        tp_pct = self.strategy_config.take_profit_pct
+        update = {}
+        if position.direction == TradeDirection.LONG:
+            if position.stop_loss <= 0:
+                update["stop_loss"] = float(entry_price * (Decimal("1") - sl_pct))
+            if position.take_profit <= 0:
+                update["take_profit"] = float(entry_price * (Decimal("1") + tp_pct))
+        elif position.direction == TradeDirection.SHORT:
+            if position.stop_loss <= 0:
+                update["stop_loss"] = float(entry_price * (Decimal("1") + sl_pct))
+            if position.take_profit <= 0:
+                update["take_profit"] = float(entry_price * (Decimal("1") - tp_pct))
+        
+        return position.model_copy(update=update) if update else position
+    
+    async def _refresh_account_if_needed(self) -> bool:
+        """
+        按需刷新账户信息
+        
+        Returns:
+            bool: 账户快照是否可用（刷新失败时返回 False，本轮应跳过交易）
+        """
+        due = self._now_ms() - self._last_account_refresh_ms >= self.account_refresh_interval
+        if not (self._account_dirty or due):
+            return True
+        try:
+            await self._update_account_info()
+            return True
+        except Exception as e:
+            logger.error(f"刷新账户信息失败，本轮暂停交易: {e}")
+            self._account_dirty = True
+            return False
+    
+    def _now_ms(self) -> int:
+        return int(time.time() * 1000)
+    
+    def _ws_price_is_fresh(self, symbol: str) -> bool:
+        """最近 max_ws_price_age_ms 内是否收到过该交易对的 WebSocket 价格推送"""
+        last = self._last_ws_price_ms.get(symbol)
+        return last is not None and self._now_ms() - last <= self.max_ws_price_age_ms
+    
+    def _can_trade(self, symbol: str) -> bool:
+        """
+        该交易对是否允许下新单
+        
+        下单后需要同时满足：
+        1. 距上次下单已超过 min_trade_interval；
+        2. 持仓快照是在冷却期结束之后从交易所刷新的（确认上一笔订单的成交已反映到持仓中）。
+        """
+        last = self.last_trade_times.get(symbol)
+        if last is None:
+            return True
+        ready_at = last + self.min_trade_interval
+        if self._now_ms() < ready_at:
+            return False
+        return self._last_account_refresh_ms >= ready_at
+    
+    def _record_trade(self, symbol: str):
+        """记录下单时间，并要求下一轮从交易所重新同步持仓"""
+        self.last_trade_times[symbol] = self._now_ms()
+        self._account_dirty = True
+    
     async def _execute_strategy_for_symbol(self, symbol: str):
         """为指定交易对执行策略"""
         try:
             # 首先尝试从WebSocket获取价格历史数据
             klines = self.price_history.get(symbol, [])
             
-            # 如果WebSocket数据不足，尝试从REST API获取Ticker数据构建简单K线
-            if len(klines) < self.strategy_config.medium_ma_period:
-                logger.debug(f"{symbol}: WebSocket数据不足 (收到{len(klines)}/{self.strategy_config.medium_ma_period})，尝试使用Ticker数据")
+            # 如果WebSocket数据不足或没有新的推送，从REST API获取Ticker数据构建简单K线。
+            # 之前只在数据不足 medium_ma_period 条时才拉 REST：凑满 5 条后若 WebSocket 没有推送
+            # （断线、未连接），价格会永久冻结在第 5 条，止盈止损和信号都基于过期价格
+            if len(klines) < self.strategy_config.medium_ma_period or not self._ws_price_is_fresh(symbol):
+                logger.debug(f"{symbol}: WebSocket数据不足或已过期 (收到{len(klines)}/{self.strategy_config.medium_ma_period})，尝试使用Ticker数据")
                 
                 # 获取合约ID
                 contract_id = self.contract_ids.get(symbol)
@@ -427,6 +554,18 @@ class HighFrequencyStrategy:
         if signal.direction == TradeDirection.HOLD:
             return
         
+        if not self._can_trade(symbol):
+            logger.debug(f"[开仓] {symbol} 处于交易冷却期或等待持仓同步，跳过")
+            return
+        
+        unconfirmed = self._unconfirmed_opens.get(symbol, 0)
+        if unconfirmed >= self.max_unconfirmed_opens:
+            logger.error(
+                f"[开仓] {symbol} 已提交 {unconfirmed} 笔开仓单但交易所持仓中仍看不到该交易对，"
+                f"暂停开仓以防重复建仓（请检查持仓同步/成交情况；出现持仓后自动恢复）"
+            )
+            return
+        
         try:
             # 计算仓位大小
             current_price = Decimal(str(signal.price))
@@ -487,12 +626,14 @@ class HighFrequencyStrategy:
                 leverage=self.strategy_config.leverage
             )
             
-            # 下单
-            result = await self.client.place_order(order)
+            # 下单。无论成功与否都进入冷却并等待持仓同步：超时/网络错误时订单可能已被
+            # 交易所接受，立即重试会重复开仓；被拒绝时也避免每秒重复提交
+            try:
+                result = await self.client.place_order(order)
+            finally:
+                self._record_trade(symbol)
+            self._unconfirmed_opens[symbol] = unconfirmed + 1
             logger.info(f"[开仓] {symbol} 订单提交成功: {result}")
-            
-            # 记录交易时间
-            self.last_trade_time = int(datetime.now().timestamp() * 1000)
             
         except Exception as e:
             logger.error(f"[开仓] {symbol} 失败: {e}")
@@ -548,18 +689,27 @@ class HighFrequencyStrategy:
         if not position:
             return
         
+        if not self._can_trade(symbol):
+            logger.debug(f"[平仓] {symbol} 处于交易冷却期或等待持仓同步，跳过")
+            return
+        
         try:
-            # 创建平仓订单（反向操作）
+            # 创建平仓订单（反向操作）。只减仓：本地持仓过期（已被平掉/已强平）时，
+            # 交易所会拒绝而不是反向开出一笔新仓位
             order = Order(
                 symbol=symbol,
                 side=OrderSide.SELL if position.direction == TradeDirection.LONG else OrderSide.BUY,
                 order_type=OrderType.MARKET,
                 quantity=position.size,
-                leverage=position.leverage
+                leverage=position.leverage,
+                reduce_only=True
             )
             
-            # 下单
-            result = await self.client.place_order(order)
+            # 下单（失败也进入冷却，原因同开仓；持仓刷新后若仍存在会再次尝试平仓）
+            try:
+                result = await self.client.place_order(order)
+            finally:
+                self._record_trade(symbol)
             logger.info(f"[平仓] {symbol} 订单提交成功: {result}")
             
             # 记录交易

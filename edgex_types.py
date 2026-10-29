@@ -66,6 +66,7 @@ class Order(BaseModel):
     quantity: float
     price: Optional[float] = None
     leverage: int
+    reduce_only: bool = False  # 平仓单应为只减仓，避免持仓已不存在时反向开仓
 
 class TradeRecord(BaseModel):
     """交易记录"""
